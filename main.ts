@@ -2,7 +2,10 @@
 //
 // Reads the sealed snapshot at /input/snapshot.json (or --input <file|dir>),
 // fits the value model in lib/model.ts on the snapshot's own priced
-// protocols, ranks the pre-token protocols by implied value, and writes:
+// protocols (three variants raced on walk-forward and blind holdouts),
+// fits a launch-odds model on every protocol's token record, ranks the
+// pre-token protocols by implied value with a costed farm verdict on
+// every row, and writes:
 //   /output/board.json     the ranked board (the gate reads this)
 //   /output/data.js        the same board, as the dashboard's data
 //   /output/dashboard/     a copy of this repository's dashboard/
@@ -103,6 +106,7 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols scanned, ${radar.counts.preToken} record no token, ${radar.counts.eligible} launch candidates ranked, ${radar.counts.pricedComps} priced comparables fitted\n` +
     `token radar: board of ${board.length} rows, all ${snapshot.watchlist.length} watchlist protocols covered, holdout median factor ${radar.model.holdoutMedianFactor}\n` +
+    `token radar: value model variant ${radar.model.variant} (${radar.model.featureCount} fitted terms); launch-odds holdout AUC ${radar.model.launch.auc}, Brier ${radar.model.launch.brier}; verdicts go ${radar.model.verdicts.go} / selective ${radar.model.verdicts.selective} / skip ${radar.model.verdicts.skip}\n` +
     `token radar: top of the board: ${board.slice(0, 3).map((r) => `#${r.rank} ${r.slug} $${r.implied_value_usd.toLocaleString('en-US')}`).join('; ')}\n` +
     `token radar: wrote board.json, data.js, dashboard/ (${pageFiles.length} files, ${pageBytes} source bytes), screenshots/ (${shots.length} images) and dossier.json under ${out}\n`,
 );

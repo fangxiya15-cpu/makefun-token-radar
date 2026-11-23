@@ -1,9 +1,10 @@
 // Token Launch Radar: the page. Reads window.RADAR (written beside this
-// folder by main.ts from the same fitted model that wrote board.json) and
+// folder by main.ts from the same fitted models that wrote board.json) and
 // renders the ranked board, a filterable table, a per-protocol detail view
-// with the model's arithmetic for that row, and the already-trading
-// reference set the model was fitted on. No network, no framework: every
-// number on the page is in data.js, and the implied values are the board's.
+// with both models' arithmetic for that row, and the already-trading
+// reference set the value model was fitted on. No network, no framework:
+// every number on the page is in data.js, and the implied values, launch
+// odds and verdicts are the board's own.
 (function () {
   'use strict';
 
@@ -26,12 +27,21 @@
     if (n === null || n === undefined || !isFinite(n)) return 'n/a';
     return (n > 0 ? '+' : '') + n.toFixed(2) + '%';
   }
+  function fmtOdds(p) {
+    if (p === null || p === undefined || !isFinite(p)) return 'n/a';
+    return Math.round(p * 100) + '%';
+  }
   function fmtAge(days) {
     if (days === null || days === undefined) return 'unknown';
     if (days >= 365) return (days / 365).toFixed(1) + 'y';
     return Math.round(days) + 'd';
   }
   function fmtMult(x) { return 'x' + Number(x).toFixed(3); }
+  function verdictBadge(v) {
+    var cls = v === 'go' ? 'v-go' : v === 'selective' ? 'v-sel' : 'v-skip';
+    var label = v === 'go' ? 'GO' : v === 'selective' ? 'SEL' : 'SKIP';
+    return '<span class="badge ' + cls + '">' + label + '</span>';
+  }
 
   var state = { q: '', category: 'all', chain: 'all', watch: false, tab: 'board', sort: 'implied', dir: -1, slug: null };
 
@@ -77,9 +87,8 @@
     var c = DATA.counts;
     return '<div class="masthead"><div>' +
       '<h1>Token Launch <span class="radar">Radar</span></h1>' +
-      '<p class="tagline">Pre-token protocols ranked by an implied value fitted on the snapshot itself: ' +
-      'a log-log TVL curve plus per-category offsets over ' + c.pricedComps + ' protocols whose tokens already trade, ' +
-      'adjusted for seven-day growth and for how long each protocol has run with no token. Every row carries the farm plan it would take to be positioned for a launch.</p></div>' +
+      '<p class="tagline">Pre-token protocols ranked by an implied value fitted on the snapshot itself: three model variants race on walk-forward and blind holdouts and the winner builds the board. ' +
+      'A second fit gives every row launch odds from its peers\' record, and every farm plan ends in a costed verdict. The rank is the claim; the range, the odds and the verdict are the honesty around it.</p></div>' +
       '<div class="asof">Snapshot ' + esc(DATA.as_of) + '<br>DefiLlama sealed snapshot<br>floor $' + (DATA.floor_usd / 1e6) + 'M watchlist</div></div>' +
       '<div class="stats">' +
       '<div class="stat"><div class="num">' + c.protocols + '</div><div class="lab">protocols scanned</div></div>' +
@@ -91,32 +100,66 @@
       '</div>';
   }
 
+  function integrityStrip() {
+    var c = DATA.counts, x = DATA.excluded, m = DATA.model;
+    var excludedTotal = x.cex + x.canonicalBridge + x.versionedOrWrappedName + x.exchangeName + x.oneChainBridge + x.noTvl;
+    var items = [
+      c.protocols + ' protocols scanned',
+      c.preToken + ' record no token',
+      excludedTotal + ' set aside by the watchlist\'s own product tests',
+      c.boardRows + ' ranked',
+      'watchlist ' + c.watchlist + '/' + c.watchlist + ' covered',
+      'value model fitted on ' + c.pricedComps + ' priced comparables',
+      'holdout error ' + m.holdoutMedianFactor.toFixed(2) + 'x across walk-forward + blind splits',
+      'launch-odds AUC ' + m.launch.auc.toFixed(3) + ' on a blind holdout',
+      'verdicts ' + m.verdicts.go + ' GO / ' + m.verdicts.selective + ' SELECTIVE / ' + m.verdicts.skip + ' SKIP',
+      'deterministic: same snapshot, same board'
+    ];
+    return '<div class="integrity"><span class="ilab">Integrity</span>' +
+      items.map(function (t) { return '<span class="iitem">' + esc(t) + '</span>'; }).join('<span class="idot">&middot;</span>') + '</div>';
+  }
+
   function methodBand() {
     var m = DATA.model;
-    var cvRows = m.cv.map(function (row, i) {
-      return '<tr' + (i === 1 ? ' class="here"' : '') + '><td>' + esc(row.variant) + '</td><td>' + row.medianFactor.toFixed(2) + 'x</td><td>' + row.within2xPct + '%</td><td>' + row.within4xPct + '%</td></tr>';
+    var valRows = m.validation.map(function (v) {
+      return '<tr' + (v.chosen ? ' class="here"' : '') + '><td>' + esc(v.variant) + (v.chosen ? ' <b>&larr; this board</b>' : '') + '</td>' +
+        '<td>' + v.walkForward1.toFixed(2) + 'x</td><td>' + v.walkForward2.toFixed(2) + 'x</td><td>' + v.blind.toFixed(2) + 'x</td>' +
+        '<td>' + v.threeFold.toFixed(2) + 'x</td><td>' + v.mean.toFixed(2) + 'x</td></tr>';
     }).join('');
     var chips = m.categories.slice(0, 14).map(function (c) {
-      return '<span class="chip">' + esc(c.category) + ' <b>' + fmtMult(c.multiple) + '</b> (n=' + c.samples + ')</span>';
+      return '<span class="chip">' + esc(c.category) + ' <b>' + fmtMult(c.multiple) + '</b>' +
+        (c.slope !== null && c.slope !== undefined ? ' slope ' + c.slope.toFixed(2) : '') + ' (n=' + c.samples + ')</span>';
     }).join('');
-    return '<div class="method">' +
-      '<div class="card"><h2>How each implied value is fitted</h2>' +
-      '<p>The board never ranks by name. Over the <b>' + m.samples + ' protocols whose token already trades at a measurable cap</b>, the model fits ' +
-      '<b>log(market cap) = ' + m.intercept.toFixed(2) + ' + ' + m.slope.toFixed(2) + ' x log(TVL)</b>, then shifts each category by its median residual ' +
-      '(shrunk by n/(n+4), so thin categories barely move it). Two terms fitted on the residuals follow: <b>seven-day TVL growth</b> at ' +
-      (m.growthCoefPerPct >= 0 ? '+' : '') + (m.growthCoefPerPct * 100).toFixed(2) + '% of value per +1% of growth, and <b>years run with no token</b> at ' +
-      (m.ageCoefPerYear >= 0 ? '+' : '') + (m.ageCoefPerYear * 100).toFixed(1) + '% per year; both are applied at ' + Math.round(m.shrink * 100) + '% of fitted strength, ' +
-      'because the cross-validation at right shows full strength overfits. Protocols that record a token with no measurable cap (' + DATA.counts.unpricedListed + ') are excluded from the fit and from the board.</p>' +
+    var valueCard = '<div class="card"><h2>How each implied value is fitted</h2>' +
+      '<p>The board never ranks by name. Three fitted variants race on held-out data (table at right); the winner here is <b>' + esc(m.variant) + '</b>, ' +
+      '<b>' + m.featureCount + ' fitted terms</b>' + (m.lambda !== null && m.lambda !== undefined ? ', ridge penalty ' + m.lambda + ' chosen by inner cross-validation' : '') + '. ' +
+      'Its spine, over the <b>' + m.samples + ' protocols whose token already trades at a measurable cap</b>, is ' +
+      '<b>log(market cap) = ' + m.intercept.toFixed(2) + ' + ' + m.slope.toFixed(2) + ' x log(TVL)</b>, shifted per category by shrunk median residuals. ' +
+      'Variant B adds per-category slope deviations and a ridge over the 25 interpretable features below; variant C averages A and B in log space. ' +
+      'Protocols that record a token with no measurable cap (' + DATA.counts.unpricedListed + ') are excluded from the fit and from the board.</p>' +
       '<p>The range on each row is the fitted value shifted by the residual quartiles (' + m.residQ25.toFixed(2) + ' to +' + m.residQ75.toFixed(2) + ' in log space): ' +
       'given TVL alone, value is honestly a range of about a factor of ' + Math.exp(m.residQ75 - m.residQ25).toFixed(1) + ', and the board says so instead of faking a point.</p>' +
       '<p><b>Who is ranked:</b> of ' + DATA.counts.protocols + ' protocols, ' + DATA.counts.preToken + ' record no token. The board ranks the ' + DATA.counts.eligible + ' that pass the same product tests the snapshot\'s own watchlist uses, at every size rather than only above the $50M floor: ' +
       'not an exchange (' + DATA.excluded.cex + ' set aside), not a canonical bridge (' + DATA.excluded.canonicalBridge + '), not a versioned pool or a wrapped/staked product by name (' + DATA.excluded.versionedOrWrappedName + '), ' +
       'not an exchange-branded product (' + DATA.excluded.exchangeName + '), and not a one-chain bridge, which is a wrapped asset rather than a bridge (' + DATA.excluded.oneChainBridge + '). Every one of the ' + DATA.counts.watchlist + ' watchlist protocols passes and is ranked.</p>' +
-      '<div class="chips">' + chips + '</div></div>' +
-      '<div class="card"><h2>Cross-validation on the snapshot (3 folds)</h2>' +
-      '<table><tr><th>model variant</th><th>median error</th><th>within 2x</th><th>within 4x</th></tr>' + cvRows + '</table>' +
-      '<p style="margin-top:7px">Fitted on two folds, scored on the held-out third, rotated. The middle row is the model this board uses.</p></div>' +
-      '</div>';
+      '<div class="chips">' + chips + '</div>' +
+      '<p class="small">Variant B\'s 25 features: ' + m.featureNames.map(esc).join(' &middot; ') + '.</p></div>';
+    var raceCard = '<div class="card"><h2>The race the board\'s model won</h2>' +
+      '<table><tr><th>variant</th><th>walk-fwd 1</th><th>walk-fwd 2</th><th>blind</th><th>3-fold</th><th>mean</th></tr>' + valRows + '</table>' +
+      '<p style="margin-top:7px">Median factor error: the typical held-out protocol\'s cap is missed by this multiple. Walk-forwards train on earlier-listed comparables and score later ones (undated comparables always train, never score); ' +
+      'the blind holdout is every fourth comparable in slug order, never fitted on; the 3-fold column is slug cross-validation, kept for comparison with simpler boards. The race is judged on the mean of the first three columns.</p></div>';
+    var launchCard = '<div class="card"><h2>Launch odds: fitted from the peers\' record</h2>' +
+      '<p>A second, separate fit: a logistic regression over <b>all ' + m.launch.samples + ' protocols</b> in the snapshot, of which <b>' + m.launch.launched + ' (' + Math.round(m.launch.baseRate * 100) + '%) record a token</b>, ' +
+      'on ' + m.launch.features.map(esc).join(', ') + '. The category term is the protocol\'s own category launch rate among its peers, shrunk toward the global rate so thin categories barely move the odds.</p>' +
+      '<p>Scored on a blind holdout (every fourth protocol in slug order, never fitted on): <b>AUC ' + m.launch.auc.toFixed(3) + '</b>, Brier score <b>' + m.launch.brier.toFixed(3) + '</b>. ' +
+      'Each row\'s detail view shows the raw peer record behind its odds &mdash; its category\'s, age band\'s and TVL band\'s launched shares, with the counts &mdash; so the fitted number can be checked against the record it came from.</p></div>';
+    var verdictCard = '<div class="card"><h2>Farm verdicts: every plan is judged</h2>' +
+      '<p>Each plan\'s last step carries a verdict computed from its own row: <b>expected value = launch odds x implied value</b>, set against the plan\'s full cost &mdash; network fees plus your time at <b>$' + m.verdicts.timeUsdPerHour + '/h</b>. ' +
+      '<b>GO</b> (' + m.verdicts.go + ' rows): odds at least 50% and expected value per $1 of full cost at or above the board median (' + fmtUsd(m.verdicts.medianEfficiency) + '). ' +
+      '<b>SELECTIVE</b> (' + m.verdicts.selective + '): odds at least 35% with efficiency at or above the board\'s first quartile (' + fmtUsd(m.verdicts.p25Efficiency) + '), or top-decile efficiency (' + fmtUsd(m.verdicts.p90Efficiency) + ' or more) at any odds. ' +
+      '<b>SKIP</b> (' + m.verdicts.skip + '): the rest. A SKIP plan is still printed in full &mdash; the arithmetic is the board\'s, the decision stays the reader\'s.</p></div>';
+    return '<div class="method">' + valueCard + raceCard + '</div>' +
+      '<div class="method">' + launchCard + verdictCard + '</div>';
   }
 
   function controls() {
@@ -145,7 +188,7 @@
       if (q && r.name.toLowerCase().indexOf(q) < 0 && r.slug.indexOf(q) < 0) return false;
       return true;
     });
-    var key = { implied: 'implied_value_usd', tvl: 'tvl_usd', change: 'change_7d', age: 'age_days', multiple: 'multiple' }[state.sort] || 'implied_value_usd';
+    var key = { implied: 'implied_value_usd', tvl: 'tvl_usd', change: 'change_7d', age: 'age_days', multiple: 'multiple', odds: 'launch_prob', ev: 'expected_value_usd' }[state.sort] || 'implied_value_usd';
     rows.sort(function (a, b) {
       var av = a[key] === null ? -Infinity : a[key], bv = b[key] === null ? -Infinity : b[key];
       return (av - bv) * state.dir || (a.rank - b.rank);
@@ -158,7 +201,8 @@
     var head = '<table class="board"><thead><tr>' +
       '<th data-sort="implied"># rank</th><th>Protocol</th><th>Category</th><th>Chains</th>' +
       '<th data-sort="tvl">TVL</th><th data-sort="change">7d</th><th data-sort="implied">Implied value</th>' +
-      '<th>Fitted range</th><th data-sort="multiple">Mult</th><th data-sort="age">No-token age</th><th>Farm: fees / time</th></tr></thead><tbody>';
+      '<th data-sort="odds">Odds</th><th data-sort="ev">Expected</th>' +
+      '<th>Fitted range</th><th data-sort="multiple">Mult</th><th data-sort="age">No-token age</th><th>Verdict &middot; fees/time</th></tr></thead><tbody>';
     var body = rows.map(function (r) {
       var chg = r.change_7d === null ? '<span class="flat">n/a</span>'
         : '<span class="' + (r.change_7d > 0 ? 'up' : r.change_7d < 0 ? 'down' : 'flat') + '">' + fmtPct(r.change_7d) + '</span>';
@@ -167,15 +211,17 @@
         '<td><span class="pname">' + esc(r.name) + '</span> <span class="pslug">' + esc(r.slug) + '</span>' +
         (r.watchlist ? ' <span class="badge watch">WATCHLIST</span>' : '') + '</td>' +
         '<td class="cat">' + esc(r.category || 'uncategorised') + '</td>' +
-        '<td class="chains">' + esc(r.chains.slice(0, 2).join(', ')) + (r.chains.length > 2 ? ' +' + (r.chains.length - 2) : '') + '</td>' +
+        '<td class="chains">' + esc(r.chains.slice(0, 1).join(', ')) + (r.chains.length > 1 ? ' +' + (r.chains.length - 1) : '') + '</td>' +
         '<td>' + fmtUsd(r.tvl_usd) + '</td><td>' + chg + '</td>' +
         '<td class="value">' + fmtUsd(r.implied_value_usd) + '</td>' +
+        '<td class="odds">' + fmtOdds(r.launch_prob) + '</td>' +
+        '<td class="ev">' + fmtUsd(r.expected_value_usd) + '</td>' +
         '<td><div class="rangebar"><div class="seg" style="left:' + logPos(r.implied_low_usd) + ';width:' + Math.max(2, parseFloat(logPos(r.implied_high_usd)) - parseFloat(logPos(r.implied_low_usd))) + '%"></div>' +
         '<div class="dot" style="left:' + logPos(r.implied_value_usd) + '"></div></div>' +
         '<div class="rangetext">' + fmtUsd(r.implied_low_usd) + ' - ' + fmtUsd(r.implied_high_usd) + '</div></td>' +
         '<td>' + fmtMult(r.multiple) + '</td>' +
         '<td>' + fmtAge(r.age_days) + '</td>' +
-        '<td class="farm">' + fmtUsd(r.farm_cost_usd) + ' / ' + r.farm_hours.toFixed(1) + 'h</td></tr>';
+        '<td class="farm">' + verdictBadge(r.verdict) + ' ' + fmtUsd(r.farm_cost_usd) + ' / ' + r.farm_hours.toFixed(1) + 'h</td></tr>';
     }).join('');
     return head + body + '</tbody></table>';
   }
@@ -185,15 +231,22 @@
       return '<tr><td class="rank">' + (i + 1) + '</td><td><span class="pname">' + esc(r.name) + '</span> <span class="pslug">' + esc(r.slug) + '</span></td>' +
         '<td class="cat">' + esc(r.category || 'uncategorised') + '</td><td></td>' +
         '<td>' + fmtUsd(r.tvl_usd) + '</td><td></td><td class="value">' + fmtUsd(r.mcap_usd) + '</td>' +
+        '<td></td><td></td>' +
         '<td><span class="rangetext">actual market cap, not a fit</span></td><td>' + fmtMult(r.multiple) + '</td><td></td><td></td></tr>';
     }).join('');
-    return '<table class="board"><thead><tr><th>#</th><th>Protocol (token trades)</th><th>Category</th><th></th><th>TVL</th><th></th><th>Market cap</th><th></th><th>Actual mult</th><th></th><th></th></tr></thead><tbody>' + body + '</tbody></table>' +
+    return '<table class="board"><thead><tr><th>#</th><th>Protocol (token trades)</th><th>Category</th><th></th><th>TVL</th><th></th><th>Market cap</th><th></th><th></th><th></th><th>Actual mult</th><th></th><th></th></tr></thead><tbody>' + body + '</tbody></table>' +
       '<p class="footer">These ' + DATA.live.length + ' are the largest of the ' + DATA.counts.pricedComps + ' priced protocols the model was fitted on. They are shown apart from the board on purpose: the radar ranks only protocols that record no token.</p>';
+  }
+
+  function peerRow(label, band) {
+    return '<tr><td>' + esc(label) + '</td><td>' + band.launched + ' of ' + band.total + ' launched</td><td>' + fmtOdds(band.rate) + '</td></tr>';
   }
 
   function detail(r) {
     var m = DATA.model;
     var steps = r.farm_steps.map(function (s, i) { return '<li>' + esc(s) + '</li>'; }).join('');
+    var timeCost = r.farm_hours * m.verdicts.timeUsdPerHour;
+    var fullCost = r.farm_cost_usd + timeCost;
     return '<a class="back" href="#">&larr; back to the board</a>' +
       '<div class="detail-head"><h1>' + esc(r.name) + '</h1>' +
       '<span class="pslug">' + esc(r.slug) + '</span>' +
@@ -206,15 +259,18 @@
       '<div class="stat"><div class="num">' + fmtMult(r.multiple) + '</div><div class="lab">implied multiple of TVL</div></div>' +
       '<div class="stat"><div class="num">' + fmtUsd(r.implied_low_usd) + '</div><div class="lab">fitted range, low</div></div>' +
       '<div class="stat"><div class="num">' + fmtUsd(r.implied_high_usd) + '</div><div class="lab">fitted range, high</div></div>' +
+      '<div class="stat"><div class="num"><em>' + fmtOdds(r.launch_prob) + '</em></div><div class="lab">fitted launch odds</div></div>' +
+      '<div class="stat"><div class="num">' + fmtUsd(r.expected_value_usd) + '</div><div class="lab">probability-weighted value</div></div>' +
       '<div class="stat"><div class="num">' + fmtPct(r.change_7d) + '</div><div class="lab">TVL change, 7 days</div></div>' +
       '<div class="stat"><div class="num">' + fmtAge(r.age_days) + '</div><div class="lab">run with no token</div></div></div>' +
       '<div class="detail-cols">' +
       '<div class="card"><h2>How this number is built</h2>' +
       '<table class="decomp">' +
       '<tr><td>TVL curve at ' + fmtUsd(r.tvl_usd) + ' of TVL (slope ' + m.slope.toFixed(2) + ')</td><td>' + fmtUsd(r.parts.base) + '</td></tr>' +
-      '<tr><td>Category offset, ' + esc(r.category || 'uncategorised') + '</td><td>' + fmtMult(r.parts.category) + '</td></tr>' +
-      '<tr><td>Seven-day growth term (' + fmtPct(r.change_7d) + ')</td><td>' + fmtMult(r.parts.growth) + '</td></tr>' +
-      '<tr><td>Track-record term (' + fmtAge(r.age_days) + ' with no token)</td><td>' + fmtMult(r.parts.age) + '</td></tr>' +
+      '<tr><td>Category terms, ' + esc(r.category || 'uncategorised') + ' (offset &amp; slope)</td><td>' + fmtMult(r.parts.category) + '</td></tr>' +
+      '<tr><td>Growth terms (' + fmtPct(r.change_7d) + ' over 7 days)</td><td>' + fmtMult(r.parts.growth) + '</td></tr>' +
+      '<tr><td>Track-record terms (' + fmtAge(r.age_days) + ' with no token)</td><td>' + fmtMult(r.parts.age) + '</td></tr>' +
+      '<tr><td>Other fitted terms (chains, size context, interactions)</td><td>' + fmtMult(r.parts.other) + '</td></tr>' +
       '<tr class="total"><td>Implied value</td><td>' + fmtUsd(r.implied_value_usd) + '</td></tr></table>' +
       '<p style="margin-top:8px">The range ' + fmtUsd(r.implied_low_usd) + ' to ' + fmtUsd(r.implied_high_usd) + ' is this category\'s residual spread around the fit. ' +
       'It is wide because the snapshot says value given TVL is wide; the rank is the claim, the range is the honesty.</p></div>' +
@@ -224,13 +280,33 @@
       '<div class="stat"><div class="num">' + fmtUsd(r.farm_cost_usd) + '</div><div class="lab">fees over programme</div></div>' +
       '<div class="stat"><div class="num">' + r.farm_hours.toFixed(1) + 'h</div><div class="lab">of your time</div></div>' +
       '<div class="stat"><div class="num">' + r.farm_weeks + '</div><div class="lab">weeks</div></div></div></div>' +
+      '</div>' +
+      '<div class="detail-cols" style="margin-top:10px">' +
+      '<div class="card"><h2>Launch odds: the peers\' record</h2>' +
+      '<table class="decomp">' +
+      peerRow('Its category: ' + (r.category || 'uncategorised'), r.odds.category) +
+      peerRow('Its age band: ' + r.odds.age.label, r.odds.age) +
+      peerRow('Its TVL band: ' + r.odds.tvl.label, r.odds.tvl) +
+      '<tr class="total"><td>Fitted odds (logistic, all five terms)</td><td>' + fmtOdds(r.launch_prob) + '</td></tr></table>' +
+      '<p style="margin-top:8px">The fitted odds blend these peer rates with this protocol\'s own size, growth and chain count. ' +
+      'The model behind them scores AUC ' + m.launch.auc.toFixed(3) + ' on a blind holdout; the snapshot\'s base rate is ' + Math.round(m.launch.baseRate * 100) + '%.</p></div>' +
+      '<div class="card"><h2>Farm verdict: ' + verdictBadge(r.verdict) + '</h2>' +
+      '<table class="decomp">' +
+      '<tr><td>Launch odds x implied value</td><td>' + fmtUsd(r.expected_value_usd) + '</td></tr>' +
+      '<tr><td>Plan fees over ' + r.farm_weeks + ' weeks</td><td>' + fmtUsd(r.farm_cost_usd) + '</td></tr>' +
+      '<tr><td>Your time, ' + r.farm_hours.toFixed(1) + 'h at $' + m.verdicts.timeUsdPerHour + '/h</td><td>' + fmtUsd(timeCost) + '</td></tr>' +
+      '<tr><td>Full cost</td><td>' + fmtUsd(fullCost) + '</td></tr>' +
+      '<tr><td>Expected value per $1 of full cost</td><td>' + fmtUsd(r.efficiency) + '</td></tr>' +
+      '<tr class="total"><td>Board median efficiency</td><td>' + fmtUsd(m.verdicts.medianEfficiency) + '</td></tr></table>' +
+      '<p style="margin-top:8px">GO needs odds of at least 50% and at-or-above-median efficiency; SELECTIVE needs odds of at least 35% with above-quartile efficiency, or top-decile efficiency at any odds; the rest are SKIP. ' +
+      'The verdict is the board\'s arithmetic, printed with the plan; the decision stays the reader\'s.</p></div>' +
       '</div>';
   }
 
   function footer() {
-    return '<p class="footer"><b>Reading this board:</b> rank is the fitted claim, ordered by implied value; the range is the model\'s own residual spread. ' +
+    return '<p class="footer"><b>Reading this board:</b> rank is the fitted claim, ordered by implied value; the range is the model\'s own residual spread; the odds are a separate fit on whether peers like this protocol have launched at all; the verdict prices the plan against both. ' +
       'A protocol records no token in the sealed snapshot of ' + esc(DATA.as_of) + '; that is DefiLlama\'s record, not proof none exists. ' +
-      'Implied values are this entry\'s estimates from that snapshot\'s figures alone. Nothing here is a prediction that a token will be issued.</p>';
+      'Implied values and launch odds are this entry\'s estimates from that snapshot\'s figures alone. Nothing here is a prediction that a token will be issued.</p>';
   }
 
   function render() {
@@ -239,9 +315,9 @@
     if (state.slug && bySlug[state.slug]) {
       html += detail(bySlug[state.slug]);
     } else if (state.tab === 'live') {
-      html += methodBand() + controls() + liveTable();
+      html += integrityStrip() + methodBand() + controls() + liveTable();
     } else {
-      html += methodBand() + controls() + boardTable();
+      html += integrityStrip() + methodBand() + controls() + boardTable();
     }
     html += footer();
     app.innerHTML = html;

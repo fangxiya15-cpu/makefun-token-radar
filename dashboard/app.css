@@ -49,6 +49,11 @@ button, input, select { font: inherit; color: inherit; }
 .stat .num em { font-style: normal; color: var(--amber); }
 .stat .lab { color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.6px; margin-top: 1px; }
 
+/* Integrity strip */
+.integrity { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; background: var(--panel2); border: 1px solid var(--line); border-left: 3px solid var(--teal); border-radius: var(--radius); padding: 8px 12px; margin-bottom: 14px; font-size: 12.5px; color: var(--muted); }
+.integrity .ilab { color: var(--teal); font-weight: 700; text-transform: uppercase; letter-spacing: 0.7px; font-size: 11.5px; margin-right: 2px; }
+.integrity .idot { color: var(--faint); }
+
 /* Method band */
 .method { display: grid; grid-template-columns: 1.25fr 1fr; gap: 10px; margin-bottom: 14px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; }
@@ -79,9 +84,9 @@ button, input, select { font: inherit; color: inherit; }
 table.board { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 table.board th { text-align: right; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--faint); padding: 7px 6px; border-bottom: 1px solid var(--line2); cursor: pointer; white-space: nowrap; }
 table.board th:first-child, table.board th:nth-child(2) { text-align: left; }
-table.board td { padding: 5px 6px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; font-size: 13px; }
+table.board td { padding: 5px 5px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; font-size: 12.5px; }
 table.board td:first-child, table.board td:nth-child(2) { text-align: left; }
-table.board td:nth-child(2) { max-width: 330px; overflow: hidden; text-overflow: ellipsis; }
+table.board td:nth-child(2) { max-width: 272px; overflow: hidden; text-overflow: ellipsis; }
 table.board tbody tr { cursor: pointer; }
 table.board tbody tr:hover { background: #16223a; }
 .rank { color: var(--faint); font-weight: 600; }
@@ -89,13 +94,19 @@ table.board tbody tr:hover { background: #16223a; }
 .pslug { color: var(--faint); font-size: 12px; }
 .badge { display: inline-block; border-radius: 4px; padding: 0 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.4px; }
 .badge.watch { background: rgba(45, 212, 191, 0.14); color: var(--teal); border: 1px solid rgba(45, 212, 191, 0.4); }
+.badge.v-go { background: rgba(74, 222, 128, 0.14); color: var(--green); border: 1px solid rgba(74, 222, 128, 0.45); }
+.badge.v-sel { background: rgba(242, 181, 68, 0.13); color: var(--amber); border: 1px solid rgba(242, 181, 68, 0.45); }
+.badge.v-skip { background: rgba(100, 118, 154, 0.13); color: var(--faint); border: 1px solid rgba(100, 118, 154, 0.4); }
+.odds { color: var(--teal); font-weight: 650; }
+.ev { color: var(--text); }
+.card p.small { font-size: 11.5px; color: var(--faint); }
 .cat { color: var(--muted); }
 .chains { color: var(--faint); font-size: 12.5px; }
 .value { color: var(--amber); font-weight: 700; }
 .up { color: var(--green); }
 .down { color: var(--red); }
 .flat { color: var(--faint); }
-.rangebar { position: relative; height: 8px; background: var(--panel2); border-radius: 4px; min-width: 84px; }
+.rangebar { position: relative; height: 8px; background: var(--panel2); border-radius: 4px; min-width: 60px; }
 .rangebar .seg { position: absolute; top: 1px; height: 6px; border-radius: 3px; background: linear-gradient(90deg, #7a5a17, var(--amber)); }
 .rangebar .dot { position: absolute; top: 0; width: 2px; height: 8px; background: #fff; }
 .rangetext { color: var(--faint); font-size: 11.5px; }
