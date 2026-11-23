@@ -165,14 +165,12 @@
         (c.slope !== null && c.slope !== undefined ? ' slope ' + c.slope.toFixed(2) : '') + ' (n=' + c.samples + ')' +
         (c.samples < 3 ? ' <span class="badge thin">thin sample</span>' : '') + '</span>';
     }).join('');
-    var shrinkTxt = m.categoryPower === 1
-      ? 'shrunk n/(n+' + m.categoryShrink + ') toward the curve'
-      : 'shrunk (n/(n+' + m.categoryShrink + '))<sup>' + m.categoryPower + '</sup> toward the curve — tiered by sample size: a category fitted on one comparable keeps only ' + Math.round(Math.pow(1 / (1 + m.categoryShrink), m.categoryPower) * 100) + '% of its raw offset, one fitted on ten keeps ' + Math.round(Math.pow(10 / (10 + m.categoryShrink), m.categoryPower) * 100) + '%, and categories under three comparables are flagged thin wherever they appear';
+    var shrinkTxt = 'shrunk n/(n+' + m.categoryShrink + ') toward the curve, and categories under three comparables are flagged thin wherever they appear';
     var valueCard = '<div class="card"><h2>How each implied value is fitted</h2>' +
       '<p>The board never ranks by name. Four fitted variants race on held-out data (table at right); the winner here is <b>' + esc(m.variant) + '</b>, ' +
       '<b>' + m.featureCount + ' fitted terms</b>' + (m.lambda !== null && m.lambda !== undefined ? ', ridge penalty ' + m.lambda + ' chosen by inner cross-validation' : '') + '. ' +
       'Its spine, over the <b>' + m.samples + ' protocols whose token already trades at a measurable cap</b>, is ' +
-      '<b>log(market cap) = ' + m.intercept.toFixed(2) + ' + ' + m.slope.toFixed(2) + ' x log(TVL)</b>, shifted per category by median residuals ' + shrinkTxt + ' — the shrinkage and the tier power themselves chosen by inner cross-validation, as is every other knob: the audit table below lists each term, how its number was set, and the evidence. ' +
+      '<b>log(market cap) = ' + m.intercept.toFixed(2) + ' + ' + m.slope.toFixed(2) + ' x log(TVL)</b>, shifted per category by median residuals ' + shrinkTxt + ' — the shrinkage itself chosen by inner cross-validation, as is every other knob: the audit table below lists each term, how its number was set, and the evidence. ' +
       'Protocols that record a token with no measurable cap (' + DATA.counts.unpricedListed + ') are excluded from the fit and from the board.</p>' +
       '<p>The range on each row is the fitted value shifted by the category\'s residual spread (centred quartiles, ' + m.residQ25.toFixed(2) + ' to +' + m.residQ75.toFixed(2) + ' in log space globally): ' +
       'given TVL alone, value is honestly a range of about a factor of ' + Math.exp(m.residQ75 - m.residQ25).toFixed(1) + ', and the board says so instead of faking a point.</p>' +
@@ -388,7 +386,7 @@
       '<div class="card"><h2>How this number is built</h2>' +
       '<table class="decomp">' +
       '<tr><td>TVL curve at ' + fmtUsd(r.tvl_usd) + ' of TVL (slope ' + m.slope.toFixed(2) + ')</td><td>' + fmtUsd(r.parts.base) + '</td></tr>' +
-      '<tr><td>Category terms, ' + esc(r.category || 'uncategorised') + (catN !== undefined ? ' (fitted on ' + catN + ' priced comparable' + (catN === 1 ? '' : 's') + (catN < 3 ? ' — a thin sample: its offset is pooled toward the TVL curve at the tiered rate, and the fitted range below borrows the global spread' : '') + ')' : '') + '</td><td>' + fmtMult(r.parts.category) + '</td></tr>' +
+      '<tr><td>Category terms, ' + esc(r.category || 'uncategorised') + (catN !== undefined ? ' (fitted on ' + catN + ' priced comparable' + (catN === 1 ? '' : 's') + (catN < 3 ? ' — a thin sample: its offset is shrunk toward the TVL curve, and the fitted range below borrows the global spread' : '') + ')' : '') + '</td><td>' + fmtMult(r.parts.category) + '</td></tr>' +
       '<tr><td>Growth terms (' + fmtPct(r.change_7d) + ' over 7 days)</td><td>' + fmtMult(r.parts.growth) + '</td></tr>' +
       '<tr><td>Track-record terms (' + fmtAge(r.age_days) + ' with no token)</td><td>' + fmtMult(r.parts.age) + '</td></tr>' +
       '<tr><td>Other fitted terms (chains, size context, interactions)</td><td>' + fmtMult(r.parts.other) + '</td></tr>' +

@@ -87,29 +87,14 @@ export const BOARD_TARGET = 280;
  */
 export const ADJUSTMENT_SHRINK_GRID = [0, 0.125, 0.25, 0.375, 0.5, 0.75, 1];
 export const CATEGORY_SHRINK_GRID = [1, 2, 4, 8, 16];
-/**
- * The category offset keeps (n/(n+catShrink))^catPower of its raw median
- * residual: the shrinkage is tiered by the category's own sample count,
- * so a category fitted on a single comparable is pooled toward the TVL
- * curve far harder than one fitted on thirty. Power 1 is the flat form
- * the earlier versions shipped; higher powers enter only by winning the
- * same inner cross-validation that picks every other knob.
- */
-export const CATEGORY_POWER_GRID = [1, 1.5, 2, 3];
 export const SLOPE_SHRINK_GRID = [4, 8, 16, 32];
 export const BLEND_WEIGHT_GRID = [0.25, 0.375, 0.5, 0.625, 0.75];
 
-/** Variant A's chosen knobs and the inner score that chose them. */
+/** Variant A's two chosen knobs and the inner score that chose them. */
 export interface HyperA {
   shrink: number;
   catShrink: number;
-  catPower: number;
   cvFactor: number;
-}
-
-/** The fraction of a category's raw offset that survives pooling. */
-export function categoryKeep(n: number, catShrink: number, catPower: number): number {
-  return Math.pow(n / (n + catShrink), catPower);
 }
 
 /** Days between the snapshot's as_of and a protocol's listed_at, or null. */
@@ -252,7 +237,6 @@ export interface ModelFit {
   ageCoef: number; // variant A reporting: per year with no token, after shrink
   shrink: number; // variant A's chosen adjustment strength
   categoryShrink: number; // chosen offset shrinkage (also used for the interval)
-  categoryPower: number; // chosen offset tier power: 1 is the flat form
   categories: CategoryFit[];
   residQ25: number;
   residQ75: number;
@@ -303,7 +287,7 @@ function univariateSlope(rows: { x: number; y: number }[]): number {
 }
 
 /** Fit the level line, category offsets and (shrunk) adjustment terms. */
-function fitRaw(train: SnapshotProtocol[], asOf: string, shrink: number, catShrink: number, catPower: number): RawFit {
+function fitRaw(train: SnapshotProtocol[], asOf: string, shrink: number, catShrink: number): RawFit {
   const { slope, intercept } = olsLine(
     train.map((p) => Math.log(p.tvl_usd)),
     train.map((p) => Math.log(p.mcap_usd!)),
@@ -318,7 +302,7 @@ function fitRaw(train: SnapshotProtocol[], asOf: string, shrink: number, catShri
   const offsets = new Map<string, { n: number; offset: number; raw: number }>();
   for (const [key, resid] of byCat) {
     const raw = median(resid);
-    offsets.set(key, { n: resid.length, offset: categoryKeep(resid.length, catShrink, catPower) * raw, raw });
+    offsets.set(key, { n: resid.length, offset: (resid.length / (resid.length + catShrink)) * raw, raw });
   }
   const offsetOf = (p: SnapshotProtocol) => offsets.get(p.category ?? '(uncategorised)')?.offset ?? 0;
   const residAfterCat = train.map((p) => Math.log(p.mcap_usd!) - base(p) - offsetOf(p));
@@ -346,13 +330,13 @@ function fitRaw(train: SnapshotProtocol[], asOf: string, shrink: number, catShri
 }
 
 /** Deterministic three-fold cross-validation of one model variant. */
-function crossValidate(samples: SnapshotProtocol[], asOf: string, shrink: number, catShrink: number, catPower: number): { medianFactor: number; within2x: number; within4x: number } {
+function crossValidate(samples: SnapshotProtocol[], asOf: string, shrink: number, catShrink: number): { medianFactor: number; within2x: number; within4x: number } {
   const sorted = [...samples].sort((a, b) => (a.slug < b.slug ? -1 : 1));
   const abs: number[] = [];
   for (let fold = 0; fold < 3; fold++) {
     const train = sorted.filter((_, i) => i % 3 !== fold);
     const test = sorted.filter((_, i) => i % 3 === fold);
-    const fit = fitRaw(train, asOf, shrink, catShrink, catPower);
+    const fit = fitRaw(train, asOf, shrink, catShrink);
     for (const p of test) abs.push(Math.abs(Math.log(p.mcap_usd!) - fit.predict(p)));
   }
   const within = (cap: number) => abs.filter((e) => e < cap).length / abs.length;
@@ -360,32 +344,29 @@ function crossValidate(samples: SnapshotProtocol[], asOf: string, shrink: number
 }
 
 /** Slug three-fold median factor of the raw A-form fit at one knob setting. */
-function aFormFactor(train: SnapshotProtocol[], asOf: string, shrink: number, catShrink: number, catPower: number): number {
+function aFormFactor(train: SnapshotProtocol[], asOf: string, shrink: number, catShrink: number): number {
   const sorted = [...train].sort((a, b) => (a.slug < b.slug ? -1 : 1));
   const errs: number[] = [];
   for (let fold = 0; fold < 3; fold++) {
     const tr = sorted.filter((_, i) => i % 3 !== fold);
     const te = sorted.filter((_, i) => i % 3 === fold);
-    const fit = fitRaw(tr, asOf, shrink, catShrink, catPower);
+    const fit = fitRaw(tr, asOf, shrink, catShrink);
     for (const p of te) errs.push(Math.abs(Math.log(p.mcap_usd!) - fit.predict(p)));
   }
   return Math.exp(median(errs));
 }
 
 /**
- * Choose variant A's adjustment strength, offset shrinkage and offset
- * tier power on this training set alone, by inner slug three-fold
- * cross-validation over the three grids. Ties keep the earlier
- * (simpler) grid point, so the tiered form ships only when it wins.
+ * Choose variant A's adjustment strength and offset shrinkage on this
+ * training set alone, by inner slug three-fold cross-validation over the
+ * two grids. Ties keep the earlier (simpler) grid point.
  */
 export function chooseHyperA(train: SnapshotProtocol[], asOf: string): HyperA {
-  let best: HyperA = { shrink: ADJUSTMENT_SHRINK_GRID[0]!, catShrink: CATEGORY_SHRINK_GRID[0]!, catPower: CATEGORY_POWER_GRID[0]!, cvFactor: Number.POSITIVE_INFINITY };
+  let best: HyperA = { shrink: ADJUSTMENT_SHRINK_GRID[0]!, catShrink: CATEGORY_SHRINK_GRID[0]!, cvFactor: Number.POSITIVE_INFINITY };
   for (const shrink of ADJUSTMENT_SHRINK_GRID) {
     for (const catShrink of CATEGORY_SHRINK_GRID) {
-      for (const catPower of CATEGORY_POWER_GRID) {
-        const cvFactor = aFormFactor(train, asOf, shrink, catShrink, catPower);
-        if (cvFactor < best.cvFactor - 1e-12) best = { shrink, catShrink, catPower, cvFactor };
-      }
+      const cvFactor = aFormFactor(train, asOf, shrink, catShrink);
+      if (cvFactor < best.cvFactor - 1e-12) best = { shrink, catShrink, cvFactor };
     }
   }
   return best;
@@ -680,7 +661,7 @@ function categoryTable(offsets: Map<string, { n: number; offset: number; raw: nu
 
 /** Variant A: the v1 form, kept as a racing baseline and blend ingredient. */
 function fitVariantA(train: SnapshotProtocol[], asOf: string, hyper: HyperA): ValuePredictor {
-  const raw = fitRaw(train, asOf, hyper.shrink, hyper.catShrink, hyper.catPower);
+  const raw = fitRaw(train, asOf, hyper.shrink, hyper.catShrink);
   const offsetOf = (p: SnapshotProtocol) => raw.offsets.get(p.category ?? '(uncategorised)')?.offset ?? 0;
   return {
     predict: (p) => {
@@ -712,7 +693,7 @@ const SLOPE_MIN_SAMPLES = 6;
  * penalties that nearly switch the dictionary off always available.
  */
 function fitVariantB(train: SnapshotProtocol[], asOf: string, ctx: FeatureContext, lambda: number, slopeShrink: number, hyper: HyperA, defs: FeatureDef[]): ValuePredictor {
-  const raw = fitRaw(train, asOf, hyper.shrink, hyper.catShrink, hyper.catPower);
+  const raw = fitRaw(train, asOf, hyper.shrink, hyper.catShrink);
   const offsetOf = (p: SnapshotProtocol) => raw.offsets.get(p.category ?? '(uncategorised)')?.offset ?? 0;
   const byCat = new Map<string, SnapshotProtocol[]>();
   for (const p of train) {
@@ -1000,22 +981,15 @@ export function fitAll(snapshot: Snapshot): ValueModel {
   const selB = chooseBHyper(priced, asOf, ctx, selA, FEATURE_DEFS);
   const selD = chooseBHyper(priced, asOf, ctx, selA, FEATURE_DEFS_ALL);
   const selBlend = chooseBlendWeight(priced, asOf, ctx);
-  const rawA = fitRaw(priced, asOf, selA.shrink, selA.catShrink, selA.catPower);
-  const cvLevel = crossValidate(priced, asOf, 0, selA.catShrink, selA.catPower);
-  const cvApplied = crossValidate(priced, asOf, selA.shrink, selA.catShrink, selA.catPower);
-  const cvFull = crossValidate(priced, asOf, 1, selA.catShrink, selA.catPower);
+  const rawA = fitRaw(priced, asOf, selA.shrink, selA.catShrink);
+  const cvLevel = crossValidate(priced, asOf, 0, selA.catShrink);
+  const cvApplied = crossValidate(priced, asOf, selA.shrink, selA.catShrink);
+  const cvFull = crossValidate(priced, asOf, 1, selA.catShrink);
   const launch = fitLaunchModel(snapshot);
   const f3 = (x: number) => x.toFixed(3);
   const audit: AuditRow[] = [
     { term: 'TVL curve (slope & intercept)', how: `OLS of log(cap) on log(TVL) over the ${priced.length} priced comparables`, validation: 'inside every variant; the race scores it on walk-forward + blind splits' },
-    {
-      term: 'Category offsets',
-      how:
-        selA.catPower === 1
-          ? `per-category median residual, shrunk n/(n+${selA.catShrink}) toward the TVL curve`
-          : `per-category median residual, shrunk (n/(n+${selA.catShrink}))^${selA.catPower} toward the TVL curve — tiered by sample size: a category fitted on one comparable keeps ${Math.round(categoryKeep(1, selA.catShrink, selA.catPower) * 100)}% of its raw offset, one on ten keeps ${Math.round(categoryKeep(10, selA.catShrink, selA.catPower) * 100)}%`,
-      validation: `shrinkage and tier power chosen jointly by inner 3-fold CV over {1, 2, 4, 8, 16} x {1, 1.5, 2, 3}: ${f3(selA.cvFactor)}x at the chosen point${selA.catPower === 1 ? '; the tiered powers were raced and did not beat the flat form' : ''}`,
-    },
+    { term: 'Category offsets', how: `per-category median residual, shrunk n/(n+${selA.catShrink})`, validation: `shrinkage chosen by inner 3-fold CV over {1, 2, 4, 8, 16}: ${f3(selA.cvFactor)}x at the chosen point` },
     { term: 'Growth & track-record strength', how: `residual slopes applied at ${selA.shrink} of fitted strength`, validation: `strength chosen by inner 3-fold CV over {0, .125, .25, .375, .5, .75, 1}: ${f3(selA.cvFactor)}x` },
     { term: 'Category slope deviations (B, C, D)', how: `per-category residual slopes, shrunk n/(n+${selB.slopeShrink}), categories with ${SLOPE_MIN_SAMPLES}+ samples`, validation: `shrinkage chosen jointly with the ridge penalty by inner 3-fold CV: ${f3(selB.cvFactor)}x` },
     { term: 'Ridge penalty, 25-feature dictionary (B, C)', how: `lambda = ${selB.lambda}, Huber-robust (residuals past 2 log units downweighted)`, validation: `chosen by inner 3-fold CV over {1..1000} x slope shrinkage {4, 8, 16, 32}` },
@@ -1049,7 +1023,6 @@ export function fitAll(snapshot: Snapshot): ValueModel {
     ageCoef: rawA.ageCoef,
     shrink: selA.shrink,
     categoryShrink: selA.catShrink,
-    categoryPower: selA.catPower,
     categories: predictor.categories,
     residQ25: quartile(globalResid.map((r) => r - median(globalResid)), 0.25),
     residQ75: quartile(globalResid.map((r) => r - median(globalResid)), 0.75),
@@ -1085,9 +1058,9 @@ export function impliedFor(p: SnapshotProtocol, vm: ValueModel): Implied {
   const pred = vm.predictor.predict(p);
   const catResid = vm.residByCat.get(p.category ?? '(uncategorised)');
   // The interval pools a category's spread toward the global spread at the
-  // same tiered strength the offset itself was shrunk at: a thin category
-  // borrows the global quartiles instead of trusting its own few residuals.
-  const w = catResid ? categoryKeep(catResid.length, fit.categoryShrink, fit.categoryPower) : 0;
+  // same strength the offset itself was shrunk at: a thin category borrows
+  // the global quartiles instead of trusting its own few residuals.
+  const w = catResid ? catResid.length / (catResid.length + fit.categoryShrink) : 0;
   // The interval carries dispersion, not location: the category offset
   // already holds the location, so each category's residuals are centred
   // on their own median before their quartiles are taken (a shrunk offset
@@ -1923,7 +1896,6 @@ export interface RadarData {
     ageCoefPerYear: number;
     shrink: number;
     categoryShrink: number;
-    categoryPower: number;
     residQ25: number;
     residQ75: number;
     holdoutMedianFactor: number;
@@ -2100,7 +2072,6 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       ageCoefPerYear: Math.round(fit.ageCoef * 10000) / 10000,
       shrink: fit.shrink,
       categoryShrink: fit.categoryShrink,
-      categoryPower: fit.categoryPower,
       residQ25: Math.round(fit.residQ25 * 1000) / 1000,
       residQ75: Math.round(fit.residQ75 * 1000) / 1000,
       holdoutMedianFactor: Math.round(fit.holdoutMedianFactor * 100) / 100,
