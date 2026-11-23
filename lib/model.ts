@@ -10,32 +10,38 @@
 //      cap (mcap_usd > 0). Protocols that record a token but no measurable
 //      cap are set aside as "listed, unpriced" and never used as evidence;
 //      protocols with no token recorded are the board's subjects.
-//   2. Three candidate variants are fitted and raced on held-out data:
+//   2. Four candidate variants are fitted and raced on held-out data:
 //      A, the v1 form (a log-log TVL curve, per-category median-residual
-//      offsets shrunk n/(n+4), and growth / track-record terms fitted on
-//      the residuals and applied at a quarter of their fitted strength);
-//      B, per-category slopes shrunk toward the global slope plus a ridge
-//      regression over 25 interpretable features derived from the snapshot
-//      fields (growth shape, age shape, chain footprint, size context,
-//      name shape, and two interactions), its penalty chosen by inner
-//      cross-validation; and C, the log-space average of A and B.
+//      offsets, and growth / track-record terms fitted on the residuals);
+//      B, A plus per-category slope deviations and a ridge regression over
+//      25 interpretable features derived from the snapshot fields; C, a
+//      log-space blend of A and B; and D, B's structure over an extended
+//      49-feature dictionary. Every remaining knob in A and B — the
+//      adjustment strength, the offset and slope shrinkage constants, the
+//      ridge penalty and the blend weight — is chosen by inner slug
+//      three-fold cross-validation on the training set alone, never set
+//      by hand; the dashboard's method panel prints the audit table of
+//      what chose each number.
 //   3. The race is run on three outer splits the fitting never sees: two
 //      expanding-window walk-forwards over the comparables' listing dates
 //      and one blind slug-ordered holdout, with a slug three-fold score
 //      kept for reference. The variant with the lowest mean holdout median
 //      factor error is refitted on every comparable and becomes the board.
 //   4. Interval: the estimate's range is the fitted value shifted by the
-//      category's residual quartiles (shrunk toward the global quartiles),
-//      because the honest finding of every fit is that value given TVL is
-//      a range, not a point: the typical miss is a factor of about four.
+//      category's residual quartiles — centred per category, since the
+//      offset already carries the location, and shrunk toward the global
+//      quartiles by the same chosen constant as the offsets — because
+//      the honest finding of every fit is that value given TVL is a
+//      range, not a point: the typical miss is a factor of about four.
 //
-// Launch-odds model: a logistic regression over every protocol in the
-// snapshot (the outcome is whether a token is recorded at all), on log
-// TVL, log age, chain count, seven-day growth and the protocol's own
-// category launch rate among its peers, shrunk toward the global rate.
-// It is scored on a blind holdout (AUC and Brier score, printed on the
-// dashboard), and each row also carries the raw peer record behind the
-// odds: its category's launched share, its age band's and its TVL band's.
+// Launch-odds model: two logistic-regression specifications race on a
+// blind holdout — the v2 form (log TVL, log age, chain count, seven-day
+// growth and the protocol's own category launch rate among its peers)
+// against an extended form that adds interaction terms and growth
+// buckets and is Platt-calibrated on cross-fitted predictions. The
+// specification with the higher blind-holdout AUC ships; both AUCs are
+// printed. Each row also carries the raw peer record behind the odds:
+// its category's launched share, its age band's and its TVL band's.
 //
 // Farm verdicts: each row's plan is judged from its own numbers — the
 // fitted launch odds times the implied value (the probability-weighted
@@ -71,11 +77,25 @@ export interface Snapshot {
 /** Board size target: every watchlist protocol, plus the best of the rest. */
 export const BOARD_TARGET = 280;
 
-/** Strength at which the growth / track-record adjustments are applied. */
-export const ADJUSTMENT_SHRINK = 0.25;
+/**
+ * The grids the inner cross-validation chooses the value model's knobs
+ * from. Nothing in the model is set by hand any more: the adjustment
+ * strength, the category-offset shrinkage, the slope-deviation
+ * shrinkage, the ridge penalty and the blend weight are all picked on
+ * the training set alone, by the slug three-fold score, and the chosen
+ * values are printed in the dashboard's audit table.
+ */
+export const ADJUSTMENT_SHRINK_GRID = [0, 0.125, 0.25, 0.375, 0.5, 0.75, 1];
+export const CATEGORY_SHRINK_GRID = [1, 2, 4, 8, 16];
+export const SLOPE_SHRINK_GRID = [4, 8, 16, 32];
+export const BLEND_WEIGHT_GRID = [0.25, 0.375, 0.5, 0.625, 0.75];
 
-/** Shrinkage constant for category offsets: n / (n + CATEGORY_SHRINK). */
-export const CATEGORY_SHRINK = 4;
+/** Variant A's two chosen knobs and the inner score that chose them. */
+export interface HyperA {
+  shrink: number;
+  catShrink: number;
+  cvFactor: number;
+}
 
 /** Days between the snapshot's as_of and a protocol's listed_at, or null. */
 export function ageDays(asOf: string, listedAt: string | null): number | null {
@@ -162,14 +182,36 @@ export interface ValidationRow {
   chosen: boolean;
 }
 
+/** One calibration bin of the shipped odds pipeline, scored on the blind holdout. */
+export interface CalibBin {
+  lo: number;
+  hi: number;
+  n: number;
+  pred: number; // mean predicted probability in the bin
+  obs: number; // observed launch rate in the bin
+}
+
 /** The launch-odds model's report, carried into the dashboard. */
 export interface LaunchFitInfo {
   samples: number;
   launched: number;
   baseRate: number;
-  auc: number; // blind-holdout AUC
-  brier: number; // blind-holdout Brier score
+  auc: number; // blind-holdout AUC of the shipped specification
+  brier: number; // blind-holdout Brier score of the shipped specification
   features: string[];
+  spec: 'v2' | 'v3'; // which specification won the odds race
+  aucOther: number; // blind-holdout AUC of the specification that did not ship
+  calibrated: boolean; // whether the shipped odds are Platt-calibrated
+  calibBins: CalibBin[];
+  ridge: number; // chosen by inner CV (Brier)
+  catShrink: number; // chosen by inner CV (Brier)
+}
+
+/** One row of the "every value term" audit table printed on the dashboard. */
+export interface AuditRow {
+  term: string;
+  how: string; // how the number was set
+  validation: string; // the evidence behind the choice
 }
 
 export interface ModelFit {
@@ -177,12 +219,14 @@ export interface ModelFit {
   unpricedListed: number;
   variant: string; // the variant that won the validation race
   featureCount: number; // fitted terms in the winning value model
-  featureNames: string[]; // the ridge feature names (variant B's dictionary)
-  lambda: number | null; // variant B's chosen ridge penalty, when fitted
+  featureNames: string[]; // the winning predictor's ridge dictionary
+  lambda: number | null; // the winner's chosen ridge penalty, when it has one
   slope: number;
   intercept: number;
   growthCoef: number; // variant A reporting: per +1% of seven-day change, after shrink
   ageCoef: number; // variant A reporting: per year with no token, after shrink
+  shrink: number; // variant A's chosen adjustment strength
+  categoryShrink: number; // chosen offset shrinkage (also used for the interval)
   categories: CategoryFit[];
   residQ25: number;
   residQ75: number;
@@ -190,6 +234,7 @@ export interface ModelFit {
   cv: CvRow[];
   holdoutMedianFactor: number;
   launch: LaunchFitInfo;
+  audit: AuditRow[];
 }
 
 interface RawFit {
@@ -231,7 +276,7 @@ function univariateSlope(rows: { x: number; y: number }[]): number {
 }
 
 /** Fit the level line, category offsets and (shrunk) adjustment terms. */
-function fitRaw(train: SnapshotProtocol[], asOf: string, shrink: number): RawFit {
+function fitRaw(train: SnapshotProtocol[], asOf: string, shrink: number, catShrink: number): RawFit {
   const { slope, intercept } = olsLine(
     train.map((p) => Math.log(p.tvl_usd)),
     train.map((p) => Math.log(p.mcap_usd!)),
@@ -246,7 +291,7 @@ function fitRaw(train: SnapshotProtocol[], asOf: string, shrink: number): RawFit
   const offsets = new Map<string, { n: number; offset: number; raw: number }>();
   for (const [key, resid] of byCat) {
     const raw = median(resid);
-    offsets.set(key, { n: resid.length, offset: (resid.length / (resid.length + CATEGORY_SHRINK)) * raw, raw });
+    offsets.set(key, { n: resid.length, offset: (resid.length / (resid.length + catShrink)) * raw, raw });
   }
   const offsetOf = (p: SnapshotProtocol) => offsets.get(p.category ?? '(uncategorised)')?.offset ?? 0;
   const residAfterCat = train.map((p) => Math.log(p.mcap_usd!) - base(p) - offsetOf(p));
@@ -274,17 +319,46 @@ function fitRaw(train: SnapshotProtocol[], asOf: string, shrink: number): RawFit
 }
 
 /** Deterministic three-fold cross-validation of one model variant. */
-function crossValidate(samples: SnapshotProtocol[], asOf: string, shrink: number): { medianFactor: number; within2x: number; within4x: number } {
+function crossValidate(samples: SnapshotProtocol[], asOf: string, shrink: number, catShrink: number): { medianFactor: number; within2x: number; within4x: number } {
   const sorted = [...samples].sort((a, b) => (a.slug < b.slug ? -1 : 1));
   const abs: number[] = [];
   for (let fold = 0; fold < 3; fold++) {
     const train = sorted.filter((_, i) => i % 3 !== fold);
     const test = sorted.filter((_, i) => i % 3 === fold);
-    const fit = fitRaw(train, asOf, shrink);
+    const fit = fitRaw(train, asOf, shrink, catShrink);
     for (const p of test) abs.push(Math.abs(Math.log(p.mcap_usd!) - fit.predict(p)));
   }
   const within = (cap: number) => abs.filter((e) => e < cap).length / abs.length;
   return { medianFactor: Math.exp(median(abs)), within2x: within(Math.LN2), within4x: within(2 * Math.LN2) };
+}
+
+/** Slug three-fold median factor of the raw A-form fit at one knob setting. */
+function aFormFactor(train: SnapshotProtocol[], asOf: string, shrink: number, catShrink: number): number {
+  const sorted = [...train].sort((a, b) => (a.slug < b.slug ? -1 : 1));
+  const errs: number[] = [];
+  for (let fold = 0; fold < 3; fold++) {
+    const tr = sorted.filter((_, i) => i % 3 !== fold);
+    const te = sorted.filter((_, i) => i % 3 === fold);
+    const fit = fitRaw(tr, asOf, shrink, catShrink);
+    for (const p of te) errs.push(Math.abs(Math.log(p.mcap_usd!) - fit.predict(p)));
+  }
+  return Math.exp(median(errs));
+}
+
+/**
+ * Choose variant A's adjustment strength and offset shrinkage on this
+ * training set alone, by inner slug three-fold cross-validation over the
+ * two grids. Ties keep the earlier (simpler) grid point.
+ */
+export function chooseHyperA(train: SnapshotProtocol[], asOf: string): HyperA {
+  let best: HyperA = { shrink: ADJUSTMENT_SHRINK_GRID[0]!, catShrink: CATEGORY_SHRINK_GRID[0]!, cvFactor: Number.POSITIVE_INFINITY };
+  for (const shrink of ADJUSTMENT_SHRINK_GRID) {
+    for (const catShrink of CATEGORY_SHRINK_GRID) {
+      const cvFactor = aFormFactor(train, asOf, shrink, catShrink);
+      if (cvFactor < best.cvFactor - 1e-12) best = { shrink, catShrink, cvFactor };
+    }
+  }
+  return best;
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +371,8 @@ export interface FeatureContext {
   catMedianTvl: Map<string, number>;
   catTotalTvl: Map<string, number>;
   catCount: Map<string, number>;
+  catMedianGrowth: Map<string, number>;
+  catMaxTvl: Map<string, number>;
   tvlAsc: number[];
   meanLogTvl: number;
 }
@@ -305,20 +381,29 @@ const L2_CHAINS = ['Arbitrum', 'Base', 'Optimism', 'zkSync Era', 'Linea', 'Scrol
 
 export function buildContext(snapshot: Snapshot): FeatureContext {
   const byCat = new Map<string, number[]>();
+  const growthByCat = new Map<string, number[]>();
   const catTotalTvl = new Map<string, number>();
   const catCount = new Map<string, number>();
+  const catMaxTvl = new Map<string, number>();
   for (const p of snapshot.protocols) {
     const key = p.category ?? '(uncategorised)';
     if (!byCat.has(key)) byCat.set(key, []);
     if (p.tvl_usd > 0) byCat.get(key)!.push(p.tvl_usd);
+    if (p.change_7d !== null && Number.isFinite(p.change_7d)) {
+      if (!growthByCat.has(key)) growthByCat.set(key, []);
+      growthByCat.get(key)!.push(p.change_7d);
+    }
     catTotalTvl.set(key, (catTotalTvl.get(key) ?? 0) + Math.max(0, p.tvl_usd));
     catCount.set(key, (catCount.get(key) ?? 0) + 1);
+    catMaxTvl.set(key, Math.max(catMaxTvl.get(key) ?? 0, p.tvl_usd));
   }
   const catMedianTvl = new Map<string, number>();
   for (const [key, tvls] of byCat) catMedianTvl.set(key, tvls.length ? median(tvls) : 1);
+  const catMedianGrowth = new Map<string, number>();
+  for (const [key, gs] of growthByCat) catMedianGrowth.set(key, gs.length ? median(gs) : 0);
   const tvlAsc = snapshot.protocols.map((p) => p.tvl_usd).sort((a, b) => a - b);
   const meanLogTvl = snapshot.protocols.reduce((s, p) => s + Math.log(Math.max(1, p.tvl_usd)), 0) / snapshot.protocols.length;
-  return { asOf: snapshot.as_of, catMedianTvl, catTotalTvl, catCount, tvlAsc, meanLogTvl };
+  return { asOf: snapshot.as_of, catMedianTvl, catTotalTvl, catCount, catMedianGrowth, catMaxTvl, tvlAsc, meanLogTvl };
 }
 
 /** Years a protocol has been listed, with the v1 convention for no date. */
@@ -384,8 +469,45 @@ export const FEATURE_DEFS: FeatureDef[] = [
   { name: 'log TVL x log years listed', group: 'age', value: (p, ctx) => (Math.log(Math.max(1, p.tvl_usd)) - ctx.meanLogTvl) * Math.log1p(yearsListed(p, ctx.asOf)) },
 ];
 
-function featureValues(p: SnapshotProtocol, ctx: FeatureContext): number[] {
-  return FEATURE_DEFS.map((f) => f.value(p, ctx));
+/**
+ * Variant D's extension dictionary: 24 more features in the same spirit
+ * (growth buckets and missing-data flags, more of the chain footprint,
+ * category-relative size and growth, and the pairwise interactions the
+ * base dictionary lacks). D races B on the same splits; the extension
+ * ships only if D's mean holdout error beats the other variants'.
+ */
+export const FEATURE_DEFS_EXT: FeatureDef[] = [
+  { name: 'growth above +10%', group: 'growth', value: (p) => (p.change_7d !== null && p.change_7d > 10 ? 1 : 0) },
+  { name: 'growth below -10%', group: 'growth', value: (p) => (p.change_7d !== null && p.change_7d < -10 ? 1 : 0) },
+  { name: 'no 7d figure reported', group: 'growth', value: (p) => (p.change_7d === null ? 1 : 0) },
+  { name: 'category median 7d growth', group: 'growth', value: (p, ctx) => (ctx.catMedianGrowth.get(p.category ?? '(uncategorised)') ?? 0) / 100 },
+  { name: 'growth minus category median', group: 'growth', value: (p, ctx) => growthFrac(p) - (ctx.catMedianGrowth.get(p.category ?? '(uncategorised)') ?? 0) / 100 },
+  { name: 'on BSC', group: 'other', value: (p) => (p.chains.includes('BSC') ? 1 : 0) },
+  { name: 'on Polygon', group: 'other', value: (p) => (p.chains.includes('Polygon') ? 1 : 0) },
+  { name: 'on Avalanche', group: 'other', value: (p) => (p.chains.includes('Avalanche') ? 1 : 0) },
+  { name: 'on Bitcoin', group: 'other', value: (p) => (p.chains.includes('Bitcoin') ? 1 : 0) },
+  { name: 'five or more chains', group: 'other', value: (p) => (p.chains.length >= 5 ? 1 : 0) },
+  { name: 'chain count squared, scaled', group: 'other', value: (p) => (p.chains.length ** 2) / 25 },
+  { name: 'Ethereum and a major L2 together', group: 'other', value: (p) => (p.chains.includes('Ethereum') && p.chains.some((c) => L2_CHAINS.includes(c)) ? 1 : 0) },
+  { name: 'listed under 6 months', group: 'age', value: (p, ctx) => (yearsListed(p, ctx.asOf) < 0.5 ? 1 : 0) },
+  { name: 'no listing date recorded', group: 'age', value: (p) => (p.listed_at === null ? 1 : 0) },
+  { name: 'log years listed squared', group: 'age', value: (p, ctx) => Math.log1p(yearsListed(p, ctx.asOf)) ** 2 },
+  { name: 'log TVL vs category max', group: 'other', value: (p, ctx) => Math.log(Math.max(1, p.tvl_usd) / Math.max(1, ctx.catMaxTvl.get(p.category ?? '(uncategorised)') ?? 1)) },
+  { name: 'share of category TVL', group: 'other', value: (p, ctx) => Math.max(0, p.tvl_usd) / Math.max(1, ctx.catTotalTvl.get(p.category ?? '(uncategorised)') ?? 1) },
+  { name: 'log category median TVL', group: 'other', value: (p, ctx) => Math.log(Math.max(1, ctx.catMedianTvl.get(p.category ?? '(uncategorised)') ?? 1)) },
+  { name: 'name word count', group: 'other', value: (p) => p.name.trim().split(/\s+/).length / 6 },
+  { name: 'growth x log years listed', group: 'growth', value: (p, ctx) => growthFrac(p) * Math.log1p(yearsListed(p, ctx.asOf)) },
+  { name: 'growth x log chain count', group: 'growth', value: (p) => growthFrac(p) * Math.log(Math.max(1, p.chains.length)) },
+  { name: 'log years x log chain count', group: 'age', value: (p, ctx) => Math.log1p(yearsListed(p, ctx.asOf)) * Math.log(Math.max(1, p.chains.length)) },
+  { name: 'TVL percentile x growth', group: 'growth', value: (p, ctx) => tvlPercentile(p, ctx) * growthFrac(p) },
+  { name: 'single chain x log TVL (centred)', group: 'other', value: (p, ctx) => (p.chains.length <= 1 ? 1 : 0) * (Math.log(Math.max(1, p.tvl_usd)) - ctx.meanLogTvl) },
+];
+
+/** Variant B's dictionary (25) plus the extension (24): variant D's 49. */
+export const FEATURE_DEFS_ALL: FeatureDef[] = [...FEATURE_DEFS, ...FEATURE_DEFS_EXT];
+
+function featureValues(p: SnapshotProtocol, ctx: FeatureContext, defs: FeatureDef[]): number[] {
+  return defs.map((f) => f.value(p, ctx));
 }
 
 // ---------------------------------------------------------------------------
@@ -509,6 +631,8 @@ export interface ValuePredictor {
   categories: CategoryFit[];
   lambda: number | null;
   featureCount: number;
+  featureNames: string[];
+  blendWeight: number | null; // variant C only: the weight on A
 }
 
 function categoryTable(offsets: Map<string, { n: number; offset: number; raw: number }>, slopes: Map<string, number | null>): CategoryFit[] {
@@ -525,8 +649,8 @@ function categoryTable(offsets: Map<string, { n: number; offset: number; raw: nu
 }
 
 /** Variant A: the v1 form, kept as a racing baseline and blend ingredient. */
-function fitVariantA(train: SnapshotProtocol[], asOf: string): ValuePredictor {
-  const raw = fitRaw(train, asOf, ADJUSTMENT_SHRINK);
+function fitVariantA(train: SnapshotProtocol[], asOf: string, hyper: HyperA): ValuePredictor {
+  const raw = fitRaw(train, asOf, hyper.shrink, hyper.catShrink);
   const offsetOf = (p: SnapshotProtocol) => raw.offsets.get(p.category ?? '(uncategorised)')?.offset ?? 0;
   return {
     predict: (p) => {
@@ -539,24 +663,26 @@ function fitVariantA(train: SnapshotProtocol[], asOf: string): ValuePredictor {
     categories: categoryTable(raw.offsets, new Map()),
     lambda: null,
     featureCount: 4 + raw.offsets.size,
+    featureNames: [],
+    blendWeight: null,
   };
 }
 
 const SLOPE_MIN_SAMPLES = 6;
-const SLOPE_SHRINK = 16;
 
 /**
- * Variant B: variant A's structure, extended. A per-category slope
- * deviation (the category's residuals regressed on TVL centred at the
- * category's own mean, shrunk n/(n+10)) lets big categories tilt the
- * curve instead of only shifting it, and the 25-feature ridge dictionary
- * is fitted on whatever A plus the slope deviations still miss, so the
- * dictionary only has to explain the simple model's leftovers. Its
- * penalty is chosen by inner cross-validation over a wide grid, with
- * heavy penalties that nearly switch the dictionary off always available.
+ * Variant B (and D, with the extended dictionary): variant A's structure,
+ * extended. A per-category slope deviation (the category's residuals
+ * regressed on TVL centred at the category's own mean, shrunk
+ * n/(n+slopeShrink)) lets big categories tilt the curve instead of only
+ * shifting it, and the ridge dictionary is fitted on whatever A plus the
+ * slope deviations still miss, so the dictionary only has to explain the
+ * simple model's leftovers. The penalty and the slope shrinkage are
+ * chosen jointly by inner cross-validation over wide grids, with heavy
+ * penalties that nearly switch the dictionary off always available.
  */
-function fitVariantB(train: SnapshotProtocol[], asOf: string, ctx: FeatureContext, lambda: number): ValuePredictor {
-  const raw = fitRaw(train, asOf, ADJUSTMENT_SHRINK);
+function fitVariantB(train: SnapshotProtocol[], asOf: string, ctx: FeatureContext, lambda: number, slopeShrink: number, hyper: HyperA, defs: FeatureDef[]): ValuePredictor {
+  const raw = fitRaw(train, asOf, hyper.shrink, hyper.catShrink);
   const offsetOf = (p: SnapshotProtocol) => raw.offsets.get(p.category ?? '(uncategorised)')?.offset ?? 0;
   const byCat = new Map<string, SnapshotProtocol[]>();
   for (const p of train) {
@@ -583,7 +709,7 @@ function fitVariantB(train: SnapshotProtocol[], asOf: string, ctx: FeatureContex
       slopes.set(key, null);
       continue;
     }
-    const dev = (rows.length / (rows.length + SLOPE_SHRINK)) * (sxy / sxx);
+    const dev = (rows.length / (rows.length + slopeShrink)) * (sxy / sxx);
     slopeDevs.set(key, { dev, meanLogTvl });
     slopes.set(key, raw.slope + dev);
   }
@@ -592,7 +718,7 @@ function fitVariantB(train: SnapshotProtocol[], asOf: string, ctx: FeatureContex
     return s ? s.dev * (Math.log(p.tvl_usd) - s.meanLogTvl) : 0;
   };
   const ridge = ridgeFit(
-    train.map((p) => featureValues(p, ctx)),
+    train.map((p) => featureValues(p, ctx, defs)),
     train.map((p) => Math.log(p.mcap_usd!) - raw.predict(p) - slopeAdj(p)),
     lambda,
   );
@@ -600,11 +726,11 @@ function fitVariantB(train: SnapshotProtocol[], asOf: string, ctx: FeatureContex
     predict: (p) => {
       const base = raw.intercept + raw.slope * Math.log(p.tvl_usd);
       const category = offsetOf(p) + slopeAdj(p);
-      const contribs = ridgeContribs(ridge, featureValues(p, ctx));
+      const contribs = ridgeContribs(ridge, featureValues(p, ctx, defs));
       let growth = raw.growthCoef * growthClamped(p);
       let age = raw.ageCoef * yearsListed(p, asOf);
       let other = ridge.yMean;
-      FEATURE_DEFS.forEach((f, j) => {
+      defs.forEach((f, j) => {
         if (f.group === 'growth') growth += contribs[j]!;
         else if (f.group === 'age') age += contribs[j]!;
         else other += contribs[j]!;
@@ -613,28 +739,33 @@ function fitVariantB(train: SnapshotProtocol[], asOf: string, ctx: FeatureContex
     },
     categories: categoryTable(raw.offsets, slopes),
     lambda,
-    featureCount: 4 + raw.offsets.size + slopeDevs.size + FEATURE_DEFS.length,
+    featureCount: 4 + raw.offsets.size + slopeDevs.size + defs.length,
+    featureNames: defs.map((f) => f.name),
+    blendWeight: null,
   };
 }
 
-/** Variant C: the log-space average of A and B. */
-function fitBlend(a: ValuePredictor, b: ValuePredictor): ValuePredictor {
+/** Variant C: the log-space blend of A and B at a cross-validated weight. */
+function fitBlend(a: ValuePredictor, b: ValuePredictor, weightOnA: number): ValuePredictor {
+  const w = weightOnA;
   return {
     predict: (p) => {
       const pa = a.predict(p);
       const pb = b.predict(p);
       return {
-        log: (pa.log + pb.log) / 2,
-        base: (pa.base + pb.base) / 2,
-        category: (pa.category + pb.category) / 2,
-        growth: (pa.growth + pb.growth) / 2,
-        age: (pa.age + pb.age) / 2,
-        other: (pa.other + pb.other) / 2,
+        log: w * pa.log + (1 - w) * pb.log,
+        base: w * pa.base + (1 - w) * pb.base,
+        category: w * pa.category + (1 - w) * pb.category,
+        growth: w * pa.growth + (1 - w) * pb.growth,
+        age: w * pa.age + (1 - w) * pb.age,
+        other: w * pa.other + (1 - w) * pb.other,
       };
     },
     categories: b.categories,
     lambda: b.lambda,
     featureCount: a.featureCount + b.featureCount,
+    featureNames: b.featureNames,
+    blendWeight: w,
   };
 }
 
@@ -657,15 +788,56 @@ function threeFoldFactor(fitter: (train: SnapshotProtocol[]) => ValuePredictor, 
 
 const LAMBDA_GRID = [1, 3, 10, 30, 100, 300, 1000];
 
-/** Variant B's ridge penalty, chosen by inner three-fold CV on the train set alone. */
-function chooseLambdaB(train: SnapshotProtocol[], asOf: string, ctx: FeatureContext): number {
-  let best = LAMBDA_GRID[3]!;
-  let bestScore = Number.POSITIVE_INFINITY;
+/** Variant B/D's chosen ridge penalty and slope shrinkage, with the score that chose them. */
+export interface HyperB {
+  lambda: number;
+  slopeShrink: number;
+  cvFactor: number;
+}
+
+/**
+ * Choose the ridge penalty and the slope-deviation shrinkage jointly, by
+ * inner three-fold CV on the train set alone, for one feature dictionary.
+ */
+function chooseBHyper(train: SnapshotProtocol[], asOf: string, ctx: FeatureContext, hyper: HyperA, defs: FeatureDef[]): HyperB {
+  let best: HyperB = { lambda: LAMBDA_GRID[3]!, slopeShrink: SLOPE_SHRINK_GRID[2]!, cvFactor: Number.POSITIVE_INFINITY };
   for (const lam of LAMBDA_GRID) {
-    const score = threeFoldFactor((tr) => fitVariantB(tr, asOf, ctx, lam), train);
-    if (score < bestScore - 1e-12) {
-      bestScore = score;
-      best = lam;
+    for (const slopeShrink of SLOPE_SHRINK_GRID) {
+      const score = threeFoldFactor((tr) => fitVariantB(tr, asOf, ctx, lam, slopeShrink, hyper, defs), train);
+      if (score < best.cvFactor - 1e-12) best = { lambda: lam, slopeShrink, cvFactor: score };
+    }
+  }
+  return best;
+}
+
+/**
+ * Choose variant C's blend weight (the weight on A) by inner three-fold
+ * CV: A and B are refitted inside each fold with their own inner-chosen
+ * knobs, blended at each grid weight, and scored pooled across folds.
+ * Ties keep the weight nearest the plain average.
+ */
+function chooseBlendWeight(train: SnapshotProtocol[], asOf: string, ctx: FeatureContext): { weight: number; cvFactor: number } {
+  const sorted = [...train].sort((a, b) => (a.slug < b.slug ? -1 : 1));
+  const errs = new Map<number, number[]>(BLEND_WEIGHT_GRID.map((w) => [w, []]));
+  for (let fold = 0; fold < 3; fold++) {
+    const tr = sorted.filter((_, i) => i % 3 !== fold);
+    const te = sorted.filter((_, i) => i % 3 === fold);
+    const hyper = chooseHyperA(tr, asOf);
+    const hb = chooseBHyper(tr, asOf, ctx, hyper, FEATURE_DEFS);
+    const a = fitVariantA(tr, asOf, hyper);
+    const b = fitVariantB(tr, asOf, ctx, hb.lambda, hb.slopeShrink, hyper, FEATURE_DEFS);
+    for (const p of te) {
+      const y = Math.log(p.mcap_usd!);
+      const la = a.predict(p).log;
+      const lb = b.predict(p).log;
+      for (const w of BLEND_WEIGHT_GRID) errs.get(w)!.push(Math.abs(y - (w * la + (1 - w) * lb)));
+    }
+  }
+  let best = { weight: 0.5, cvFactor: Number.POSITIVE_INFINITY };
+  for (const w of BLEND_WEIGHT_GRID) {
+    const f = Math.exp(median(errs.get(w)!));
+    if (f < best.cvFactor - 1e-12 || (Math.abs(f - best.cvFactor) <= 1e-12 && Math.abs(w - 0.5) < Math.abs(best.weight - 0.5))) {
+      best = { weight: w, cvFactor: f };
     }
   }
   return best;
@@ -701,6 +873,7 @@ export interface ValueModel {
   fit: ModelFit;
   predictor: ValuePredictor;
   residByCat: Map<string, number[]>;
+  launch: LaunchModel;
 }
 
 /** Race the variants on held-out data, then refit the winner on everything. */
@@ -709,13 +882,26 @@ export function fitAll(snapshot: Snapshot): ValueModel {
   const asOf = snapshot.as_of;
   const priced = snapshot.protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
   const unpricedListed = snapshot.protocols.filter((p) => !recordsNoToken(p) && (p.mcap_usd === null || p.mcap_usd <= 0)).length;
-  const fitA = (tr: SnapshotProtocol[]) => fitVariantA(tr, asOf);
-  const fitB = (tr: SnapshotProtocol[]) => fitVariantB(tr, asOf, ctx, chooseLambdaB(tr, asOf, ctx));
-  const fitC = (tr: SnapshotProtocol[]) => fitBlend(fitA(tr), fitB(tr));
+  const fitA = (tr: SnapshotProtocol[]) => fitVariantA(tr, asOf, chooseHyperA(tr, asOf));
+  const fitB = (tr: SnapshotProtocol[]) => {
+    const hyper = chooseHyperA(tr, asOf);
+    const hb = chooseBHyper(tr, asOf, ctx, hyper, FEATURE_DEFS);
+    return fitVariantB(tr, asOf, ctx, hb.lambda, hb.slopeShrink, hyper, FEATURE_DEFS);
+  };
+  const fitD = (tr: SnapshotProtocol[]) => {
+    const hyper = chooseHyperA(tr, asOf);
+    const hb = chooseBHyper(tr, asOf, ctx, hyper, FEATURE_DEFS_ALL);
+    return fitVariantB(tr, asOf, ctx, hb.lambda, hb.slopeShrink, hyper, FEATURE_DEFS_ALL);
+  };
+  const fitC = (tr: SnapshotProtocol[]) => {
+    const bw = chooseBlendWeight(tr, asOf, ctx);
+    return fitBlend(fitA(tr), fitB(tr), bw.weight);
+  };
   const racers = [
-    { key: 'A: TVL curve + category offsets, growth & age at 1/4 strength (v1 form)', fit: fitA },
+    { key: 'A: TVL curve + category offsets + fitted growth & age terms (v1 form)', fit: fitA },
     { key: 'B: A + per-category slope deviations + 25-feature ridge', fit: fitB },
-    { key: 'C: blend of A and B', fit: fitC },
+    { key: 'C: cross-validated blend of A and B', fit: fitC },
+    { key: 'D: B over an extended 49-feature dictionary', fit: fitD },
   ];
   const splits = outerSplits(priced);
   const validation: ValidationRow[] = racers.map((r) => {
@@ -733,9 +919,9 @@ export function fitAll(snapshot: Snapshot): ValueModel {
       chosen: false,
     };
   });
-  // Parsimony order on ties: A before C before B.
+  // Parsimony order on ties: A before C before B before D.
   let winner = 0;
-  for (const idx of [0, 2, 1]) {
+  for (const idx of [0, 2, 1, 3]) {
     if (validation[idx]!.mean < validation[winner]!.mean - 1e-12) winner = idx;
   }
   validation[winner]!.chosen = true;
@@ -749,35 +935,68 @@ export function fitAll(snapshot: Snapshot): ValueModel {
     residByCat.get(key)!.push(r);
     globalResid.push(r);
   }
-  const rawA = fitRaw(priced, asOf, ADJUSTMENT_SHRINK);
-  const cvLevel = crossValidate(priced, asOf, 0);
-  const cvApplied = crossValidate(priced, asOf, ADJUSTMENT_SHRINK);
-  const cvFull = crossValidate(priced, asOf, 1);
+  // The audit numbers: the same deterministic selections the shipped
+  // predictor ran on the full comparable set, recomputed for the record.
+  const selA = chooseHyperA(priced, asOf);
+  const selB = chooseBHyper(priced, asOf, ctx, selA, FEATURE_DEFS);
+  const selD = chooseBHyper(priced, asOf, ctx, selA, FEATURE_DEFS_ALL);
+  const selBlend = chooseBlendWeight(priced, asOf, ctx);
+  const rawA = fitRaw(priced, asOf, selA.shrink, selA.catShrink);
+  const cvLevel = crossValidate(priced, asOf, 0, selA.catShrink);
+  const cvApplied = crossValidate(priced, asOf, selA.shrink, selA.catShrink);
+  const cvFull = crossValidate(priced, asOf, 1, selA.catShrink);
   const launch = fitLaunchModel(snapshot);
+  const f3 = (x: number) => x.toFixed(3);
+  const audit: AuditRow[] = [
+    { term: 'TVL curve (slope & intercept)', how: `OLS of log(cap) on log(TVL) over the ${priced.length} priced comparables`, validation: 'inside every variant; the race scores it on walk-forward + blind splits' },
+    { term: 'Category offsets', how: `per-category median residual, shrunk n/(n+${selA.catShrink})`, validation: `shrinkage chosen by inner 3-fold CV over {1, 2, 4, 8, 16}: ${f3(selA.cvFactor)}x at the chosen point` },
+    { term: 'Growth & track-record strength', how: `residual slopes applied at ${selA.shrink} of fitted strength`, validation: `strength chosen by inner 3-fold CV over {0, .125, .25, .375, .5, .75, 1}: ${f3(selA.cvFactor)}x` },
+    { term: 'Category slope deviations (B, C, D)', how: `per-category residual slopes, shrunk n/(n+${selB.slopeShrink}), categories with ${SLOPE_MIN_SAMPLES}+ samples`, validation: `shrinkage chosen jointly with the ridge penalty by inner 3-fold CV: ${f3(selB.cvFactor)}x` },
+    { term: 'Ridge penalty, 25-feature dictionary (B, C)', how: `lambda = ${selB.lambda}, Huber-robust (residuals past 2 log units downweighted)`, validation: `chosen by inner 3-fold CV over {1..1000} x slope shrinkage {4, 8, 16, 32}` },
+    { term: 'Ridge penalty, 49-feature dictionary (D)', how: `lambda = ${selD.lambda}, slope shrinkage ${selD.slopeShrink}`, validation: `chosen by the same inner 3-fold CV: ${f3(selD.cvFactor)}x; D ships only if it wins the outer race` },
+    { term: 'Blend weight (C)', how: `${selBlend.weight} on A, ${Math.round((1 - selBlend.weight) * 1000) / 1000} on B`, validation: `chosen by inner 3-fold CV over {0.25..0.75}: ${f3(selBlend.cvFactor)}x` },
+    { term: 'Implied-value interval', how: 'category residual quartiles, centred per category (the offset carries the location) and shrunk toward the global quartiles by the chosen offset shrinkage', validation: 'quartiles are the winner\'s own residuals on all comparables' },
+    { term: 'Launch-odds category-rate shrinkage', how: `peer launch rates shrunk toward the global rate, n/(n+${launch.info.catShrink})`, validation: 'chosen by inner 3-fold CV (Brier) over {2, 4, 8, 16, 32}' },
+    { term: 'Launch-odds ridge penalty', how: `lambda = ${launch.info.ridge} on standardised features (IRLS)`, validation: 'chosen by inner 3-fold CV (Brier) over {0.3, 1, 3, 10}' },
+    {
+      term: 'Launch-odds specification & calibration',
+      how:
+        launch.info.spec === 'v3'
+          ? 'extended spec (interactions + growth buckets), Platt-calibrated on cross-fitted predictions'
+          : 'v2 spec retained (the extended, calibrated spec did not beat it on the blind holdout)',
+      validation: `blind-holdout AUC ${f3(launch.info.auc)} shipped vs ${f3(launch.info.aucOther)} not shipped; Brier ${f3(launch.info.brier)}`,
+    },
+    { term: 'Reader time in verdicts ($20/h)', how: 'stated assumption, not a fitted term', validation: 'printed in the verdict card; verdicts recompute at any other rate by the stated formula' },
+    { term: 'Verdict odds thresholds (50% GO / 35% SELECTIVE)', how: 'stated decision rule, not a fitted term; the efficiency bars they combine with are board quantiles', validation: 'the rule and its thresholds are printed in the verdict card' },
+    { term: 'Farm-plan gas prices & capital tiers', how: 'stated plan parameters (a rough per-chain gas table, TVL-tiered capital), not fitted terms', validation: 'each plan\'s totals are summed from the same figures its steps quote' },
+  ];
   const fit: ModelFit = {
     samples: priced.length,
     unpricedListed,
     variant: racers[winner]!.key,
     featureCount: predictor.featureCount,
-    featureNames: FEATURE_DEFS.map((f) => f.name),
+    featureNames: predictor.featureNames,
     lambda: predictor.lambda,
     slope: rawA.slope,
     intercept: rawA.intercept,
     growthCoef: rawA.growthCoef,
     ageCoef: rawA.ageCoef,
+    shrink: selA.shrink,
+    categoryShrink: selA.catShrink,
     categories: predictor.categories,
-    residQ25: quartile(globalResid, 0.25),
-    residQ75: quartile(globalResid, 0.75),
+    residQ25: quartile(globalResid.map((r) => r - median(globalResid)), 0.25),
+    residQ75: quartile(globalResid.map((r) => r - median(globalResid)), 0.75),
     validation,
     cv: [
       { variant: 'TVL curve + category offsets only', medianFactor: cvLevel.medianFactor, within2xPct: cvLevel.within2x * 100, within4xPct: cvLevel.within4x * 100 },
-      { variant: 'plus growth & track-record terms at 1/4 strength (variant A)', medianFactor: cvApplied.medianFactor, within2xPct: cvApplied.within2x * 100, within4xPct: cvApplied.within4x * 100 },
+      { variant: `plus growth & track-record terms at the fitted strength (${selA.shrink})`, medianFactor: cvApplied.medianFactor, within2xPct: cvApplied.within2x * 100, within4xPct: cvApplied.within4x * 100 },
       { variant: 'plus growth & track-record terms at full strength', medianFactor: cvFull.medianFactor, within2xPct: cvFull.within2x * 100, within4xPct: cvFull.within4x * 100 },
     ],
     holdoutMedianFactor: validation[winner]!.mean,
     launch: launch.info,
+    audit,
   };
-  return { fit, predictor, residByCat };
+  return { fit, predictor, residByCat, launch };
 }
 
 export interface Implied {
@@ -797,9 +1016,17 @@ export function impliedFor(p: SnapshotProtocol, vm: ValueModel): Implied {
   const fit = vm.fit;
   const pred = vm.predictor.predict(p);
   const catResid = vm.residByCat.get(p.category ?? '(uncategorised)');
-  const w = catResid ? catResid.length / (catResid.length + CATEGORY_SHRINK) : 0;
-  const q25 = catResid ? w * quartile(catResid, 0.25) + (1 - w) * fit.residQ25 : fit.residQ25;
-  const q75 = catResid ? w * quartile(catResid, 0.75) + (1 - w) * fit.residQ75 : fit.residQ75;
+  const w = catResid ? catResid.length / (catResid.length + fit.categoryShrink) : 0;
+  // The interval carries dispersion, not location: the category offset
+  // already holds the location, so each category's residuals are centred
+  // on their own median before their quartiles are taken (a shrunk offset
+  // otherwise leaves a shifted residual distribution, and the "range" of
+  // a thin category would sit beside its own estimate instead of around
+  // it). The centred category quartiles are then shrunk toward the
+  // (likewise centred) global quartiles.
+  const centred = catResid ? catResid.map((r) => r - median(catResid)) : null;
+  const q25 = centred ? w * quartile(centred, 0.25) + (1 - w) * fit.residQ25 : fit.residQ25;
+  const q75 = centred ? w * quartile(centred, 0.75) + (1 - w) * fit.residQ75 : fit.residQ75;
   const value = Math.max(1, Math.round(Math.exp(pred.log)));
   return {
     value,
@@ -828,14 +1055,32 @@ export interface LaunchModel {
   predict: (p: SnapshotProtocol) => number;
 }
 
-const LAUNCH_FEATURE_NAMES = ['log TVL', 'log years listed', 'chain count', '7d growth', "category's launch rate among peers"];
-const LAUNCH_CAT_SHRINK = 8;
+type LaunchSpec = 'v2' | 'v3';
+
+const LAUNCH_FEATURE_NAMES_V2 = ['log TVL', 'log years listed', 'chain count', '7d growth', "category's launch rate among peers"];
+const LAUNCH_FEATURE_NAMES_V3 = [
+  ...LAUNCH_FEATURE_NAMES_V2,
+  'peer rate x log years listed',
+  'peer rate x log TVL',
+  'log TVL x log years listed',
+  'growth below -5%',
+  'growth above +5%',
+  'log TVL squared (centred)',
+];
+
+const LAUNCH_CAT_SHRINK_GRID = [2, 4, 8, 16, 32];
+const LAUNCH_RIDGE_GRID = [0.3, 1, 3, 10];
+
+interface LaunchHyper {
+  ridge: number;
+  catShrink: number;
+}
 
 function sigmoid(x: number): number {
   return 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, x))));
 }
 
-function launchCatRates(train: SnapshotProtocol[]): { rates: Map<string, number>; global: number } {
+function launchCatRates(train: SnapshotProtocol[], catShrink: number): { rates: Map<string, number>; global: number } {
   let launched = 0;
   const counts = new Map<string, { launched: number; total: number }>();
   for (const p of train) {
@@ -849,24 +1094,31 @@ function launchCatRates(train: SnapshotProtocol[]): { rates: Map<string, number>
   }
   const global = train.length ? launched / train.length : 0.5;
   const rates = new Map<string, number>();
-  for (const [key, c] of counts) rates.set(key, (c.launched + LAUNCH_CAT_SHRINK * global) / (c.total + LAUNCH_CAT_SHRINK));
+  for (const [key, c] of counts) rates.set(key, (c.launched + catShrink * global) / (c.total + catShrink));
   return { rates, global };
 }
 
-function launchRawFeatures(p: SnapshotProtocol, asOf: string, catRate: number): number[] {
+function launchRawFeatures(p: SnapshotProtocol, asOf: string, catRate: number, spec: LaunchSpec): number[] {
+  const logTvl = Math.log10(Math.max(1, p.tvl_usd));
+  const logYears = Math.log1p(yearsListed(p, asOf));
+  const base = [logTvl, logYears, Math.min(10, p.chains.length), growthFrac(p), catRate];
+  if (spec === 'v2') return base;
+  const g = p.change_7d;
   return [
-    Math.log10(Math.max(1, p.tvl_usd)),
-    Math.log1p(yearsListed(p, asOf)),
-    Math.min(10, p.chains.length),
-    growthFrac(p),
-    catRate,
+    ...base,
+    catRate * logYears,
+    catRate * logTvl,
+    (logTvl - 7) * logYears,
+    g !== null && g < -5 ? 1 : 0,
+    g !== null && g > 5 ? 1 : 0,
+    (logTvl - 7) ** 2,
   ];
 }
 
-function fitLaunch(train: SnapshotProtocol[], asOf: string): { predict: (p: SnapshotProtocol) => number } {
-  const { rates, global } = launchCatRates(train);
+function fitLaunch(train: SnapshotProtocol[], asOf: string, spec: LaunchSpec, hyper: LaunchHyper): { predict: (p: SnapshotProtocol) => number } {
+  const { rates, global } = launchCatRates(train, hyper.catShrink);
   const rateOf = (p: SnapshotProtocol) => rates.get(p.category ?? '(uncategorised)') ?? global;
-  const X = train.map((p) => launchRawFeatures(p, asOf, rateOf(p)));
+  const X = train.map((p) => launchRawFeatures(p, asOf, rateOf(p), spec));
   const y = train.map((p) => (recordsNoToken(p) ? 0 : 1));
   const n = X.length;
   const d = X[0]!.length;
@@ -885,7 +1137,7 @@ function fitLaunch(train: SnapshotProtocol[], asOf: string): { predict: (p: Snap
   const Z = X.map((row) => row.map((v, j) => (v - means[j]!) / sds[j]!));
   let b0 = Math.log(Math.max(1e-6, Math.min(1 - 1e-6, global)) / (1 - Math.max(1e-6, Math.min(1 - 1e-6, global))));
   let beta = new Array<number>(d).fill(0);
-  const RIDGE = 1.0;
+  const RIDGE = hyper.ridge;
   for (let iter = 0; iter < 200; iter++) {
     const g = new Array<number>(d + 1).fill(0);
     const H: number[][] = Array.from({ length: d + 1 }, () => new Array<number>(d + 1).fill(0));
@@ -917,10 +1169,99 @@ function fitLaunch(train: SnapshotProtocol[], asOf: string): { predict: (p: Snap
   }
   return {
     predict: (p) => {
-      const x = launchRawFeatures(p, asOf, rateOf(p));
+      const x = launchRawFeatures(p, asOf, rateOf(p), spec);
       let eta = b0;
       for (let j = 0; j < d; j++) eta += beta[j]! * ((x[j]! - means[j]!) / sds[j]!);
       return sigmoid(eta);
+    },
+  };
+}
+
+/** Choose one odds specification's ridge and category shrinkage by inner 3-fold Brier. */
+function chooseLaunchHyper(train: SnapshotProtocol[], asOf: string, spec: LaunchSpec): LaunchHyper {
+  const sorted = [...train].sort((a, b) => (a.slug < b.slug ? -1 : 1));
+  let best: LaunchHyper & { brier: number } = { ridge: 1, catShrink: 8, brier: Number.POSITIVE_INFINITY };
+  for (const ridge of LAUNCH_RIDGE_GRID) {
+    for (const catShrink of LAUNCH_CAT_SHRINK_GRID) {
+      let sse = 0;
+      let n = 0;
+      for (let fold = 0; fold < 3; fold++) {
+        const tr = sorted.filter((_, i) => i % 3 !== fold);
+        const te = sorted.filter((_, i) => i % 3 === fold);
+        const m = fitLaunch(tr, asOf, spec, { ridge, catShrink });
+        for (const p of te) {
+          sse += (m.predict(p) - (recordsNoToken(p) ? 0 : 1)) ** 2;
+          n++;
+        }
+      }
+      const brier = sse / n;
+      if (brier < best.brier - 1e-12) best = { ridge, catShrink, brier };
+    }
+  }
+  return { ridge: best.ridge, catShrink: best.catShrink };
+}
+
+/** Platt calibration: a two-parameter logistic map on the logit of a raw score. */
+function plattFit(rawScores: number[], ys: number[]): { a: number; b: number } {
+  const z = rawScores.map((q) => {
+    const c = Math.max(1e-6, Math.min(1 - 1e-6, q));
+    return Math.log(c / (1 - c));
+  });
+  let a = 0;
+  let b = 1;
+  for (let iter = 0; iter < 100; iter++) {
+    const g = [0, 0];
+    const H = [
+      [1e-4, 0],
+      [0, 1e-4],
+    ];
+    for (let i = 0; i < z.length; i++) {
+      const mu = sigmoid(a + b * z[i]!);
+      const w = Math.max(1e-6, mu * (1 - mu));
+      const r = ys[i]! - mu;
+      const row = [1, z[i]!];
+      for (let u = 0; u < 2; u++) {
+        g[u]! += row[u]! * r;
+        for (let v = 0; v < 2; v++) H[u]![v]! += w * row[u]! * row[v]!;
+      }
+    }
+    const step = solveLinear(H, g);
+    a += step[0]!;
+    b += step[1]!;
+    if (Math.max(Math.abs(step[0]!), Math.abs(step[1]!)) < 1e-10) break;
+  }
+  return { a, b };
+}
+
+/**
+ * One odds pipeline: the plain fit for the v2 specification; for v3, the
+ * fit plus a Platt map whose two parameters are fitted on cross-fitted
+ * predictions inside the training set (four slug folds), so calibration
+ * never sees the row it calibrates.
+ */
+function launchPipeline(train: SnapshotProtocol[], asOf: string, spec: LaunchSpec, hyper: LaunchHyper): { predict: (p: SnapshotProtocol) => number } {
+  const prod = fitLaunch(train, asOf, spec, hyper);
+  if (spec === 'v2') return prod;
+  const sorted = [...train].sort((a, b) => (a.slug < b.slug ? -1 : 1));
+  const oof = new Map<string, number>();
+  for (let fold = 0; fold < 4; fold++) {
+    const tr = sorted.filter((_, i) => i % 4 !== fold);
+    const te = sorted.filter((_, i) => i % 4 === fold);
+    const m = fitLaunch(tr, asOf, spec, hyper);
+    for (const p of te) oof.set(p.slug, m.predict(p));
+  }
+  const raw: number[] = [];
+  const ys: number[] = [];
+  for (const p of train) {
+    raw.push(oof.get(p.slug)!);
+    ys.push(recordsNoToken(p) ? 0 : 1);
+  }
+  const platt = plattFit(raw, ys);
+  return {
+    predict: (p) => {
+      const q = prod.predict(p);
+      const c = Math.max(1e-6, Math.min(1 - 1e-6, q));
+      return sigmoid(platt.a + platt.b * Math.log(c / (1 - c)));
     },
   };
 }
@@ -950,27 +1291,63 @@ function aucScore(scores: number[], ys: number[]): number {
   return (rankSumPos - (nPos * (nPos + 1)) / 2) / (nPos * nNeg);
 }
 
-/** Fit the production launch model on all protocols; score it on a blind holdout. */
+/**
+ * Race the two odds specifications on the blind holdout and fit the
+ * winner on all protocols. Each specification's ridge and category
+ * shrinkage are chosen by inner cross-validation on the training part;
+ * the extended specification additionally calibrates (Platt, fitted
+ * inside the training part). The shipped specification is the one with
+ * the higher blind-holdout AUC — if the extension does not beat the v2
+ * form, the v2 form ships, and both AUCs are reported either way.
+ */
 export function fitLaunchModel(snapshot: Snapshot): LaunchModel {
   const asOf = snapshot.as_of;
   const bySlug = [...snapshot.protocols].sort((a, b) => (a.slug < b.slug ? -1 : 1));
   const test = bySlug.filter((_, i) => i % 4 === 3);
   const train = bySlug.filter((_, i) => i % 4 !== 3);
-  const holdout = fitLaunch(train, asOf);
-  const scores = test.map((p) => holdout.predict(p));
   const ys = test.map((p) => (recordsNoToken(p) ? 0 : 1));
-  const auc = aucScore(scores, ys);
-  const brier = scores.reduce((s, v, i) => s + (v - ys[i]!) ** 2, 0) / scores.length;
-  const prod = fitLaunch(snapshot.protocols, asOf);
+  const race = (spec: LaunchSpec) => {
+    const hyper = chooseLaunchHyper(train, asOf, spec);
+    const holdout = launchPipeline(train, asOf, spec, hyper);
+    const scores = test.map((p) => holdout.predict(p));
+    return {
+      hyper,
+      scores,
+      auc: aucScore(scores, ys),
+      brier: scores.reduce((s, v, i) => s + (v - ys[i]!) ** 2, 0) / scores.length,
+    };
+  };
+  const r2 = race('v2');
+  const r3 = race('v3');
+  const spec: LaunchSpec = r3.auc > r2.auc + 1e-9 ? 'v3' : 'v2';
+  const win = spec === 'v3' ? r3 : r2;
+  const lose = spec === 'v3' ? r2 : r3;
+  const edges = [0, 0.2, 0.4, 0.6, 0.8, 1.0001];
+  const calibBins: CalibBin[] = [];
+  for (let b = 0; b < edges.length - 1; b++) {
+    const idx = test.map((_, i) => i).filter((i) => win.scores[i]! >= edges[b]! && win.scores[i]! < edges[b + 1]!);
+    if (!idx.length) continue;
+    const pred = idx.reduce((s, i) => s + win.scores[i]!, 0) / idx.length;
+    const obs = idx.reduce((s, i) => s + ys[i]!, 0) / idx.length;
+    calibBins.push({ lo: edges[b]!, hi: Math.min(1, edges[b + 1]!), n: idx.length, pred, obs });
+  }
+  const hyperAll = chooseLaunchHyper(snapshot.protocols, asOf, spec);
+  const prod = launchPipeline(snapshot.protocols, asOf, spec, hyperAll);
   const launched = snapshot.protocols.filter((p) => !recordsNoToken(p)).length;
   return {
     info: {
       samples: snapshot.protocols.length,
       launched,
       baseRate: launched / snapshot.protocols.length,
-      auc,
-      brier,
-      features: LAUNCH_FEATURE_NAMES,
+      auc: win.auc,
+      brier: win.brier,
+      features: spec === 'v3' ? LAUNCH_FEATURE_NAMES_V3 : LAUNCH_FEATURE_NAMES_V2,
+      spec,
+      aucOther: lose.auc,
+      calibrated: spec === 'v3',
+      calibBins,
+      ridge: hyperAll.ridge,
+      catShrink: hyperAll.catShrink,
     },
     predict: prod.predict,
   };
@@ -1235,6 +1612,131 @@ export function farmPlan(p: SnapshotProtocol, snapshot: Snapshot): FarmPlan {
   return { steps, capitalUsd: cap.high, costUsd: totalCost, hours: Math.round((minutes / 60) * 10) / 10, weeks };
 }
 
+/**
+ * The personalised plan for a top-40 row. The category still picks the
+ * core actions, but every step is assembled from this row's own fields:
+ * its actual chains and their gas prices, its seven-day change setting
+ * the pace and the tranche schedule, its TVL setting the tranche sizes,
+ * its listing year and no-token age setting the claim-ready wording.
+ * No two top-40 plans share a step text.
+ */
+export function farmPlanPersonal(p: SnapshotProtocol, snapshot: Snapshot, rank: number): FarmPlan {
+  const mainChain = p.chains[0] ?? 'Ethereum';
+  const secondChain = p.chains.length > 1 ? p.chains[1]! : null;
+  const gas1 = gasFor(mainChain);
+  const gas2 = secondChain ? gasFor(secondChain) : gas1;
+  const cap = capitalTier(p.tvl_usd);
+  const age = ageDays(snapshot.as_of, p.listed_at);
+  const years = age === null ? null : age / 365.25;
+  const listedYear = p.listed_at ? p.listed_at.slice(0, 4) : null;
+  const weeks = age === null ? 10 : age > 730 ? 8 : age > 365 ? 10 : 12;
+  const cores = coreActions(p.category, p.name);
+  const g = p.change_7d;
+  const a1 = Math.round(cap.low * 0.5);
+  const a2 = Math.round(cap.low * 0.3);
+  const a3 = cap.low - a1 - a2;
+  const w2 = Math.max(2, Math.ceil(weeks / 3));
+  const w3 = Math.max(w2 + 1, Math.ceil((2 * weeks) / 3));
+  const pacing =
+    g === null
+      ? 'The snapshot reports no seven-day TVL figure for it, so the pace follows the calendar rather than flow'
+      : g > 5
+        ? `TVL rose ${g.toFixed(1)}% in the seven days before the snapshot, so the first three weeks carry double sessions while flow is rising, then the plan drops to maintenance`
+        : g < -5
+          ? `TVL fell ${Math.abs(g).toFixed(1)}% in the seven days before the snapshot, so the tranches above are also the stop rule: if TVL halves from ${money(p.tvl_usd)}, no further tranche goes in`
+          : `TVL moved ${g >= 0 ? '+' : ''}${g.toFixed(1)}% in the seven days before the snapshot — flat flow, so sessions spread evenly across the ${weeks} weeks`;
+  const steps: string[] = [];
+  let cost = 0;
+  let minutes = 0;
+
+  steps.push(
+    `Open one wallet for ${p.name} alone and fund it on ${mainChain} in three tranches: ${money(a1)} in week 1, ${money(a2)} in week ${w2} and ${money(a3)} in week ${w3} — ${money(cap.low)} in all, rising to ${money(cap.high)} only if the first tranche behaves.${secondChain ? ` Keep about ${money(40)} of gas money on ${secondChain} as well; step 3 works there.` : ''} Cost: about ${money(gas1 * 3)} in network fees across the three fundings. Time: about 30 minutes, split across the tranche weeks.`,
+  );
+  minutes += 30;
+  cost += 3 * gas1;
+
+  const c0 = cores[0]!;
+  steps.push(
+    `${c0.text} — run it on ${mainChain}, where a session costs about ${money(gas1)} in fees. ${pacing}. Repeat across ${c0.sessions} sessions. Cost: about ${money(gas1)} per session. Time: about ${c0.minutes} minutes per session.`,
+  );
+  minutes += c0.sessions * c0.minutes;
+  cost += c0.sessions * gas1;
+
+  const c1 = cores[1]!;
+  if (secondChain) {
+    steps.push(
+      `${c1.text} — this leg runs on ${secondChain} (about ${money(gas2)} a session), which is why the wallet keeps a balance there. Repeat across ${c1.sessions} sessions. Cost: about ${money(gas2)} per session. Time: about ${c1.minutes} minutes per session.`,
+    );
+    cost += c1.sessions * gas2;
+  } else {
+    steps.push(
+      `${c1.text} — ${p.name} lives only on ${mainChain} in this snapshot, so both legs share one chain and one gas budget. Repeat across ${c1.sessions} sessions. Cost: about ${money(gas1)} per session. Time: about ${c1.minutes} minutes per session.`,
+    );
+    cost += c1.sessions * gas1;
+  }
+  minutes += c1.sessions * c1.minutes;
+
+  steps.push(
+    `Across the ${weeks} weeks, check in once a week on the position${secondChain ? ` on both ${mainChain} and ${secondChain}` : ''}: confirm TVL has not broken down (the snapshot records ${money(p.tvl_usd)}${g !== null ? `, ${g >= 0 ? 'up' : 'down'} ${Math.abs(g).toFixed(1)}% on the week` : ''}) and ${years !== null ? `remember the position's premise — ${years.toFixed(1)} years recorded with no token` : 'note any listing or token announcement, since no listing date is recorded'}. Cost: about ${money(gas1)} when a check needs a transaction. Time: about 10 minutes a week.`,
+  );
+  minutes += weeks * 10;
+  cost += Math.ceil(weeks / 2) * gas1;
+
+  steps.push(
+    `Stay claim-ready from week ${Math.max(2, weeks - 2)}: ${listedYear ? `${p.name} has been recorded since ${listedYear} with no token, so any announcement is its first` : 'no listing date is recorded for it, so watch its official channels directly rather than calendars'}; keep the wallet's history exportable and do not consolidate funds out of the farming wallet until any snapshot date has passed. Cost: no network fees. Time: about 5 minutes a week of watching.`,
+  );
+  minutes += weeks * 5;
+
+  const totalCost = Math.round(cost * 100) / 100;
+  const hours = Math.round((minutes / 60) * 10) / 10;
+  steps.push(
+    `Programme totals for ${p.name} (board rank ${rank}): ${money(cap.low)} to ${money(cap.high)} of capital in the tranches above, about ${money(totalCost)} of network fees over ${weeks} weeks, and about ${hours.toFixed(1)} hours of your time. Stop early if the token is announced with a snapshot date already past, or if TVL halves from the ${money(p.tvl_usd)} recorded here.`,
+  );
+  return { steps, capitalUsd: cap.high, costUsd: totalCost, hours, weeks };
+}
+
+/** Word-bigram set of a plan's step texts, for the template-similarity check. */
+function stepWordSet(steps: string[]): Set<string> {
+  const words: string[] = [];
+  for (const s of steps) {
+    for (const w of s.toLowerCase().split(/[^a-z0-9$%.]+/)) {
+      if (w.length > 2) words.push(w);
+    }
+  }
+  const set = new Set<string>();
+  for (let i = 0; i + 1 < words.length; i++) set.add(`${words[i]} ${words[i + 1]}`);
+  return set;
+}
+
+/**
+ * Mean pairwise Jaccard similarity of farm-step word bigrams, over the
+ * whole board and over the top 40. Printed on the dashboard: a board
+ * whose plans are one template with swapped numbers keeps the same word
+ * sequences and scores high; per-row assembly breaks the sequences and
+ * pulls the number down.
+ */
+export function farmSimilarity(rows: { farm_steps: string[] }[]): { board: number; top40: number } {
+  const sets = rows.map((r) => stepWordSet(r.farm_steps));
+  const mean = (list: Set<string>[]) => {
+    if (list.length < 2) return 0;
+    let sum = 0;
+    let n = 0;
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const a = list[i]!;
+        const b = list[j]!;
+        const [small, big] = a.size < b.size ? [a, b] : [b, a];
+        let inter = 0;
+        for (const w of small) if (big.has(w)) inter++;
+        sum += inter / (a.size + b.size - inter);
+        n++;
+      }
+    }
+    return Math.round((sum / n) * 1000) / 1000;
+  };
+  return { board: mean(sets), top40: mean(sets.slice(0, 40)) };
+}
+
 // ---------------------------------------------------------------------------
 // The board and the dashboard's data.
 // ---------------------------------------------------------------------------
@@ -1297,6 +1799,7 @@ export interface RadarData {
     growthCoefPerPct: number;
     ageCoefPerYear: number;
     shrink: number;
+    categoryShrink: number;
     residQ25: number;
     residQ75: number;
     holdoutMedianFactor: number;
@@ -1305,6 +1808,8 @@ export interface RadarData {
     categories: { category: string; samples: number; multiple: number; slope: number | null }[];
     launch: LaunchFitInfo;
     verdicts: { go: number; selective: number; skip: number; medianEfficiency: number; p25Efficiency: number; p90Efficiency: number; timeUsdPerHour: number };
+    audit: AuditRow[];
+    farmSimilarity: { board: number; top40: number };
   };
   rows: RadarRow[];
   live: LiveRow[];
@@ -1356,7 +1861,7 @@ function verdictSentence(s: Scored, medianEfficiency: number): string {
 export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: RadarData } {
   const vm = fitAll(snapshot);
   const fit = vm.fit;
-  const launch = fitLaunchModel(snapshot);
+  const launch = vm.launch;
   const peerIndex = buildPeerIndex(snapshot);
   const watch = new Set(snapshot.watchlist);
   const subjects = snapshot.protocols.filter((p) => isRankable(p) && p.tvl_usd > 0);
@@ -1375,6 +1880,14 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     if (watch.has(s.p.slug) && !chosen.includes(s)) chosen.push(s);
   }
   chosen.sort((a, b) => b.imp.value - a.imp.value || (a.p.slug < b.p.slug ? -1 : 1));
+  // The top 40 rows get the personalised plan assembly (their own chains,
+  // growth pace, tranche schedule and listing year in every step); the
+  // plan's cost and hours feed the verdict, so this happens before it.
+  chosen.forEach((s, i) => {
+    if (i < 40) s.plan = farmPlanPersonal(s.p, snapshot, i + 1);
+    s.fullCost = s.plan.costUsd + s.plan.hours * TIME_USD_PER_HOUR;
+    s.efficiency = s.fullCost > 0 ? s.ev / s.fullCost : 0;
+  });
   const effValues = chosen.map((s) => s.efficiency);
   const effMedian = quartile(effValues, 0.5);
   const effP25 = quartile(effValues, 0.25);
@@ -1454,7 +1967,8 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       intercept: Math.round(fit.intercept * 1000) / 1000,
       growthCoefPerPct: Math.round(fit.growthCoef * 10000) / 10000,
       ageCoefPerYear: Math.round(fit.ageCoef * 10000) / 10000,
-      shrink: ADJUSTMENT_SHRINK,
+      shrink: fit.shrink,
+      categoryShrink: fit.categoryShrink,
       residQ25: Math.round(fit.residQ25 * 1000) / 1000,
       residQ75: Math.round(fit.residQ75 * 1000) / 1000,
       holdoutMedianFactor: Math.round(fit.holdoutMedianFactor * 100) / 100,
@@ -1469,7 +1983,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       })),
       cv: fit.cv.map((c) => ({ variant: c.variant, medianFactor: Math.round(c.medianFactor * 100) / 100, within2xPct: Math.round(c.within2xPct), within4xPct: Math.round(c.within4xPct) })),
       categories: fit.categories
-        .filter((c) => c.samples >= 2)
+        .filter((c) => c.samples >= 1)
         .map((c) => ({ category: c.category, samples: c.samples, multiple: Math.round(c.impliedMultiple * 1000) / 1000, slope: c.slope === null ? null : Math.round(c.slope * 1000) / 1000 })),
       launch: {
         samples: fit.launch.samples,
@@ -1478,6 +1992,12 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
         auc: Math.round(fit.launch.auc * 1000) / 1000,
         brier: Math.round(fit.launch.brier * 1000) / 1000,
         features: fit.launch.features,
+        spec: fit.launch.spec,
+        aucOther: Math.round(fit.launch.aucOther * 1000) / 1000,
+        calibrated: fit.launch.calibrated,
+        calibBins: fit.launch.calibBins.map((b) => ({ lo: b.lo, hi: b.hi, n: b.n, pred: Math.round(b.pred * 1000) / 1000, obs: Math.round(b.obs * 1000) / 1000 })),
+        ridge: fit.launch.ridge,
+        catShrink: fit.launch.catShrink,
       },
       verdicts: {
         go: verdictCounts.go,
@@ -1488,6 +2008,8 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
         p90Efficiency: Math.round(effP90),
         timeUsdPerHour: TIME_USD_PER_HOUR,
       },
+      audit: fit.audit,
+      farmSimilarity: farmSimilarity(rows),
     },
     rows,
     live,

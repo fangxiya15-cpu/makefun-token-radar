@@ -225,3 +225,167 @@ Determinism: two consecutive runs of the program produce byte-identical
   (integrity strip + race table) and shows about eight board rows;
   that is the density trade the judging criteria ask for, but it is a
   trade.
+
+# Token Radar v3 — build & verification log (2026-11-23, third session)
+
+v2's judged result: win rate 0.9112 (provisional, 12/12 matches won),
+prize_eligible = true, authored share 82.7%. The verdicts praised the
+model and named the gaps precisely: the page had no reader tools (the
+one criterion v2 kept losing — the anchors ship compare, pins, CSV
+export, a command palette, a weights sandbox), the first screenshot
+spent its top half on method evidence, the farm plans read as one
+template with swapped numbers, and several constants (blend weight,
+shrinkage strengths, the odds ridge) were still set by hand. v3 attacks
+exactly those four, under the race rule throughout: nothing ships
+because it is new, only because it wins.
+
+## What changed
+
+- **Every remaining knob is chosen, not set.** The adjustment shrinkage
+  and the category-offset shrinkage are picked per variant by inner
+  3-fold CV over grids (the winner's race chose shrink = 0 — the
+  growth/age adjustments were zeroed by the data, not by preference —
+  and offset shrinkage 1, inner CV 3.82x); variant B's ridge penalty and
+  slope shrinkage are chosen jointly; the blend weight is chosen by
+  inner CV instead of fixed at 0.5; the launch-odds ridge and peer-rate
+  shrinkage are chosen by inner Brier score. The dashboard's method tab
+  prints a 14-row audit table: every value term, how its number was
+  set, and the validation evidence — with the three genuinely unfit
+  items (the $20/h time rate, the verdict odds thresholds, the farm
+  gas/capital parameters) labelled as stated assumptions, not fits.
+- **A fourth variant raced, and the feature expansion lost.** D is B's
+  structure over an extended 49-feature dictionary (24 extra features:
+  growth persistence, age curvature, per-chain TVL, name and category
+  interactions). D's mean holdout was 3.77x against A's 3.14x, so per
+  the race rule the expansion is **not** merged; the board ships the
+  race winner, which this run is variant A in closed form (38 fitted
+  terms). B's blind split blew out to 5.94x; the race table prints all
+  of it.
+- **Launch odds: two specifications raced, the extended one won.** The
+  v2 five-term form (blind AUC 0.745 with its own knobs now also
+  CV-chosen) against an 11-term form adding peer-rate interactions,
+  growth buckets and a centred TVL-squared term, Platt-calibrated on
+  cross-fitted predictions. The extended form scored AUC **0.752**,
+  Brier **0.200** on the blind holdout, so it ships; the page prints
+  both AUCs and the calibration table (predicted vs observed by bin).
+- **Intervals centred.** Category residual quartiles are now centred
+  per category before use (the offset carries the location), and the
+  global quartiles likewise. Result: all 235 fitted ranges bracket
+  their own estimates (v2 had rows whose range sat entirely on one
+  side of the estimate).
+- **Farm plans for the top 40 are assembled row by row** — tranche
+  schedules from the row's capital tier, per-chain gas from its own
+  chains, pacing from the sign of its 7-day change, a second-chain
+  role, a claim-readiness step from its listing year, and a totals
+  step carrying its rank. The rest keep v2's parameterised plans and
+  verdicts. Measured on the steps themselves (mean pairwise Jaccard
+  similarity of step word bigrams): board **0.410**, top 40 **0.452**,
+  against v2's 0.498 / 0.506 on the same measure.
+- **Dashboard: five working reader tools, density first.** Pins
+  (persisted in the browser, with a pinned-only filter), a compare
+  tray (up to three protocols side by side, including each row's
+  value build-up), CSV export of the current filtered view, a command
+  palette (/ or Ctrl-K: protocols, categories, actions), and a
+  weights sandbox that re-ranks the visible board by re-weighting the
+  fitted growth and track-record terms (an exploration tool; the
+  fitted board is never altered). The board now renders before the
+  method band, the integrity strip is one line, and the method cards
+  moved to their own tab. All five tools were exercised end-to-end in
+  a real browser session against the built page (pin persistence
+  across reload, sandbox re-rank and reset, compare modal, palette
+  search, CSV download of 235 rows). Source is 54,906 bytes in the
+  built output, whole under the dossier text cap.
+- **Screenshots** regenerated from the built /output (headless
+  Chromium, palette-quantised): the board (28 rows in frame), the
+  CCIP detail (its personalised plan), and the method & audit tab.
+
+## Validation numbers (all computed by the program at run time)
+
+| Variant | walk-fwd 1 | walk-fwd 2 | blind | 3-fold | mean |
+|---|---|---|---|---|---|
+| A: TVL curve + category offsets + CV-shrunk adjustments — this board | 3.90x | 2.78x | 2.74x | 4.19x | **3.14x** |
+| B: A + slope deviations + 25-feature ridge | 3.71x | 4.05x | 5.94x | 4.29x | 4.56x |
+| C: CV-weighted blend of A and B | 3.51x | 3.09x | 3.22x | 4.23x | 3.27x |
+| D: B over an extended 49-feature dictionary | 4.11x | 3.98x | 3.21x | 4.29x | 3.77x |
+
+Launch odds on the blind holdout: shipped (extended, calibrated)
+AUC 0.752, Brier 0.200; five-term form AUC 0.745. Winner's fitted
+terms: 38. Note the winner changed because the race is re-run with
+every knob inside the folds: with shrinkage chosen by the data, the
+closed form generalises best on this snapshot's splits, and the ridge
+variants' walk-forward-2 and blind splits say so plainly.
+
+## Board facts (v3)
+
+- 235 rows, same eligibility rules as v1/v2; watchlist 40/40.
+- Top of the board under the CV-shrunk winner: Polymarket
+  International ($766.9M), Sentora Curator ($233.6M), Steakhouse
+  Financial ($233.5M), Gauntlet ($174.5M), Predict Fun ($129.7M).
+  The #1 row rests on the Prediction Market category multiple
+  (x26.18), fitted on a single priced comparable; the category chip
+  on the page prints its n=1, and the row's range ($455M-$1.16B)
+  brackets the estimate.
+- Verdicts: 65 GO / 70 SELECTIVE / 100 SKIP.
+
+## Seven file-gate rows, checked locally against the built /output
+
+(Same replication method as v1/v2: a local gate over the program's
+actual output in a fresh directory; the kit's official `check` still
+runs at packaging time in the main session.)
+
+| Gate row | Result | Evidence |
+|---|---|---|
+| dashboard_files | PASS | 3 files, 54,906 bytes, no http(s) anywhere in source |
+| board_file | PASS | 235 rows, all slugs in the snapshot |
+| sorted_by_value | PASS | implied value non-increasing down the board |
+| coverage | PASS | 40/40 watchlist slugs present |
+| farm_steps | PASS | every row 6 steps, each 20-600 chars (seen range 215-502) |
+| screenshots | PASS | 3 PNGs, 1440x1400 each, 173 / 126 / 156 KiB (cap 512 KiB) |
+| dossier_matches | PASS | dossier rebuilt from the same /output with the repo's vendored buildDossier is byte-identical, 664,327 bytes |
+
+Determinism: two consecutive runs of the program produce
+byte-identical /output trees (diff -r clean). Runtime about 9
+seconds per run locally (four-variant race, two odds specifications
+and the calibration included), inside the sandbox's 120 seconds.
+
+## Iteration trace (v3 session, separate turns)
+
+- lib/model.ts: hyperparameter selection rebuilt around inner CV
+  (adjustment/category shrinkage, B's joint penalty grid, blend
+  weight, odds ridge/shrinkage); variant D and the extended feature
+  dictionary added; two-specification odds race with cross-fitted
+  Platt calibration; centred interval quartiles; personalised top-40
+  farm-plan assembly and the step-similarity self-measure; the
+  14-row fit audit; category table now prints n=1 categories.
+- main.ts: header and run summary updated (odds specification,
+  both AUCs, similarity figures).
+- dashboard/app.js: full rewrite — board-first render order, method
+  tab, pins/compare/CSV/palette/sandbox, calibration and audit
+  rendering; one fix after screenshot review (the winner's
+  feature-dictionary line now reads correctly for a closed-form win).
+- dashboard/app.css: one-line integrity strip, tighter masthead and
+  stats, styles for the five tools, compare/palette overlays and the
+  audit table.
+- Screenshots regenerated three times (density check, detail check,
+  final build) and quantised into the repo.
+
+## Residual risks and the honest gap to the top
+
+- The shipped model is the v1 form, re-chosen by the race rather
+  than by loyalty: the ridge variants did not generalise on this
+  run's walk-forward-2 and blind splits. That is the race working as
+  designed, but it means v3's gains sit in auditability, the odds
+  model, the plans and the page — not in a new value signal. The
+  intrinsic noise floor of value-given-TVL (about 3.1-3.2x here)
+  still bounds what any entrant can claim.
+- The #1 row's category multiple rests on one priced comparable.
+  The fit prints n=1 and the interval brackets the estimate, but a
+  judge who distrusts single-comparable categories will discount
+  the top row specifically.
+- Top-40 step similarity (0.452) still sits slightly above the
+  board mean (0.410): the personalised plans share scaffolding
+  vocabulary (cost/time/verdict phrasing) even though their content
+  is row-specific.
+- Development matches are all against house anchors; the final is a
+  full re-judging against the real field, where the top entries are
+  on their fourth to eleventh judged iteration. This is our third.
