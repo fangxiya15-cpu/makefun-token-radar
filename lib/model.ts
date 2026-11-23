@@ -87,14 +87,29 @@ export const BOARD_TARGET = 280;
  */
 export const ADJUSTMENT_SHRINK_GRID = [0, 0.125, 0.25, 0.375, 0.5, 0.75, 1];
 export const CATEGORY_SHRINK_GRID = [1, 2, 4, 8, 16];
+/**
+ * The category offset keeps (n/(n+catShrink))^catPower of its raw median
+ * residual: the shrinkage is tiered by the category's own sample count,
+ * so a category fitted on a single comparable is pooled toward the TVL
+ * curve far harder than one fitted on thirty. Power 1 is the flat form
+ * the earlier versions shipped; higher powers enter only by winning the
+ * same inner cross-validation that picks every other knob.
+ */
+export const CATEGORY_POWER_GRID = [1, 1.5, 2, 3];
 export const SLOPE_SHRINK_GRID = [4, 8, 16, 32];
 export const BLEND_WEIGHT_GRID = [0.25, 0.375, 0.5, 0.625, 0.75];
 
-/** Variant A's two chosen knobs and the inner score that chose them. */
+/** Variant A's chosen knobs and the inner score that chose them. */
 export interface HyperA {
   shrink: number;
   catShrink: number;
+  catPower: number;
   cvFactor: number;
+}
+
+/** The fraction of a category's raw offset that survives pooling. */
+export function categoryKeep(n: number, catShrink: number, catPower: number): number {
+  return Math.pow(n / (n + catShrink), catPower);
 }
 
 /** Days between the snapshot's as_of and a protocol's listed_at, or null. */
@@ -179,7 +194,17 @@ export interface ValidationRow {
   blind: number;
   threeFold: number;
   mean: number; // mean of the three outer splits: the number the race is judged on
+  vsBaselinePct: number; // error reduction against the TVL-only baseline's mean, percent
   chosen: boolean;
+}
+
+/** The TVL-only baseline's median factor errors on the same splits. */
+export interface BaselineRow {
+  walkForward1: number;
+  walkForward2: number;
+  blind: number;
+  threeFold: number;
+  mean: number;
 }
 
 /** One calibration bin of the shipped odds pipeline, scored on the blind holdout. */
@@ -227,10 +252,12 @@ export interface ModelFit {
   ageCoef: number; // variant A reporting: per year with no token, after shrink
   shrink: number; // variant A's chosen adjustment strength
   categoryShrink: number; // chosen offset shrinkage (also used for the interval)
+  categoryPower: number; // chosen offset tier power: 1 is the flat form
   categories: CategoryFit[];
   residQ25: number;
   residQ75: number;
   validation: ValidationRow[];
+  baseline: BaselineRow; // the TVL-only line scored on the same splits
   cv: CvRow[];
   holdoutMedianFactor: number;
   launch: LaunchFitInfo;
@@ -276,7 +303,7 @@ function univariateSlope(rows: { x: number; y: number }[]): number {
 }
 
 /** Fit the level line, category offsets and (shrunk) adjustment terms. */
-function fitRaw(train: SnapshotProtocol[], asOf: string, shrink: number, catShrink: number): RawFit {
+function fitRaw(train: SnapshotProtocol[], asOf: string, shrink: number, catShrink: number, catPower: number): RawFit {
   const { slope, intercept } = olsLine(
     train.map((p) => Math.log(p.tvl_usd)),
     train.map((p) => Math.log(p.mcap_usd!)),
@@ -291,7 +318,7 @@ function fitRaw(train: SnapshotProtocol[], asOf: string, shrink: number, catShri
   const offsets = new Map<string, { n: number; offset: number; raw: number }>();
   for (const [key, resid] of byCat) {
     const raw = median(resid);
-    offsets.set(key, { n: resid.length, offset: (resid.length / (resid.length + catShrink)) * raw, raw });
+    offsets.set(key, { n: resid.length, offset: categoryKeep(resid.length, catShrink, catPower) * raw, raw });
   }
   const offsetOf = (p: SnapshotProtocol) => offsets.get(p.category ?? '(uncategorised)')?.offset ?? 0;
   const residAfterCat = train.map((p) => Math.log(p.mcap_usd!) - base(p) - offsetOf(p));
@@ -319,13 +346,13 @@ function fitRaw(train: SnapshotProtocol[], asOf: string, shrink: number, catShri
 }
 
 /** Deterministic three-fold cross-validation of one model variant. */
-function crossValidate(samples: SnapshotProtocol[], asOf: string, shrink: number, catShrink: number): { medianFactor: number; within2x: number; within4x: number } {
+function crossValidate(samples: SnapshotProtocol[], asOf: string, shrink: number, catShrink: number, catPower: number): { medianFactor: number; within2x: number; within4x: number } {
   const sorted = [...samples].sort((a, b) => (a.slug < b.slug ? -1 : 1));
   const abs: number[] = [];
   for (let fold = 0; fold < 3; fold++) {
     const train = sorted.filter((_, i) => i % 3 !== fold);
     const test = sorted.filter((_, i) => i % 3 === fold);
-    const fit = fitRaw(train, asOf, shrink, catShrink);
+    const fit = fitRaw(train, asOf, shrink, catShrink, catPower);
     for (const p of test) abs.push(Math.abs(Math.log(p.mcap_usd!) - fit.predict(p)));
   }
   const within = (cap: number) => abs.filter((e) => e < cap).length / abs.length;
@@ -333,29 +360,32 @@ function crossValidate(samples: SnapshotProtocol[], asOf: string, shrink: number
 }
 
 /** Slug three-fold median factor of the raw A-form fit at one knob setting. */
-function aFormFactor(train: SnapshotProtocol[], asOf: string, shrink: number, catShrink: number): number {
+function aFormFactor(train: SnapshotProtocol[], asOf: string, shrink: number, catShrink: number, catPower: number): number {
   const sorted = [...train].sort((a, b) => (a.slug < b.slug ? -1 : 1));
   const errs: number[] = [];
   for (let fold = 0; fold < 3; fold++) {
     const tr = sorted.filter((_, i) => i % 3 !== fold);
     const te = sorted.filter((_, i) => i % 3 === fold);
-    const fit = fitRaw(tr, asOf, shrink, catShrink);
+    const fit = fitRaw(tr, asOf, shrink, catShrink, catPower);
     for (const p of te) errs.push(Math.abs(Math.log(p.mcap_usd!) - fit.predict(p)));
   }
   return Math.exp(median(errs));
 }
 
 /**
- * Choose variant A's adjustment strength and offset shrinkage on this
- * training set alone, by inner slug three-fold cross-validation over the
- * two grids. Ties keep the earlier (simpler) grid point.
+ * Choose variant A's adjustment strength, offset shrinkage and offset
+ * tier power on this training set alone, by inner slug three-fold
+ * cross-validation over the three grids. Ties keep the earlier
+ * (simpler) grid point, so the tiered form ships only when it wins.
  */
 export function chooseHyperA(train: SnapshotProtocol[], asOf: string): HyperA {
-  let best: HyperA = { shrink: ADJUSTMENT_SHRINK_GRID[0]!, catShrink: CATEGORY_SHRINK_GRID[0]!, cvFactor: Number.POSITIVE_INFINITY };
+  let best: HyperA = { shrink: ADJUSTMENT_SHRINK_GRID[0]!, catShrink: CATEGORY_SHRINK_GRID[0]!, catPower: CATEGORY_POWER_GRID[0]!, cvFactor: Number.POSITIVE_INFINITY };
   for (const shrink of ADJUSTMENT_SHRINK_GRID) {
     for (const catShrink of CATEGORY_SHRINK_GRID) {
-      const cvFactor = aFormFactor(train, asOf, shrink, catShrink);
-      if (cvFactor < best.cvFactor - 1e-12) best = { shrink, catShrink, cvFactor };
+      for (const catPower of CATEGORY_POWER_GRID) {
+        const cvFactor = aFormFactor(train, asOf, shrink, catShrink, catPower);
+        if (cvFactor < best.cvFactor - 1e-12) best = { shrink, catShrink, catPower, cvFactor };
+      }
     }
   }
   return best;
@@ -650,7 +680,7 @@ function categoryTable(offsets: Map<string, { n: number; offset: number; raw: nu
 
 /** Variant A: the v1 form, kept as a racing baseline and blend ingredient. */
 function fitVariantA(train: SnapshotProtocol[], asOf: string, hyper: HyperA): ValuePredictor {
-  const raw = fitRaw(train, asOf, hyper.shrink, hyper.catShrink);
+  const raw = fitRaw(train, asOf, hyper.shrink, hyper.catShrink, hyper.catPower);
   const offsetOf = (p: SnapshotProtocol) => raw.offsets.get(p.category ?? '(uncategorised)')?.offset ?? 0;
   return {
     predict: (p) => {
@@ -682,7 +712,7 @@ const SLOPE_MIN_SAMPLES = 6;
  * penalties that nearly switch the dictionary off always available.
  */
 function fitVariantB(train: SnapshotProtocol[], asOf: string, ctx: FeatureContext, lambda: number, slopeShrink: number, hyper: HyperA, defs: FeatureDef[]): ValuePredictor {
-  const raw = fitRaw(train, asOf, hyper.shrink, hyper.catShrink);
+  const raw = fitRaw(train, asOf, hyper.shrink, hyper.catShrink, hyper.catPower);
   const offsetOf = (p: SnapshotProtocol) => raw.offsets.get(p.category ?? '(uncategorised)')?.offset ?? 0;
   const byCat = new Map<string, SnapshotProtocol[]>();
   for (const p of train) {
@@ -904,18 +934,47 @@ export function fitAll(snapshot: Snapshot): ValueModel {
     { key: 'D: B over an extended 49-feature dictionary', fit: fitD },
   ];
   const splits = outerSplits(priced);
+  // The reference every variant is measured against: the TVL curve alone,
+  // no category offsets, no adjustments, scored on the identical splits.
+  const fitLineOnly = (tr: SnapshotProtocol[]): ValuePredictor => {
+    const line = olsLine(
+      tr.map((p) => Math.log(p.tvl_usd)),
+      tr.map((p) => Math.log(p.mcap_usd!)),
+    );
+    return {
+      predict: (p) => {
+        const base = line.intercept + line.slope * Math.log(p.tvl_usd);
+        return { log: base, base, category: 0, growth: 0, age: 0, other: 0 };
+      },
+      categories: [],
+      lambda: null,
+      featureCount: 2,
+      featureNames: [],
+      blendWeight: null,
+    };
+  };
+  const baseline: BaselineRow = {
+    walkForward1: medianFactor(fitLineOnly(splits.wf1.train).predict, splits.wf1.test),
+    walkForward2: medianFactor(fitLineOnly(splits.wf2.train).predict, splits.wf2.test),
+    blind: medianFactor(fitLineOnly(splits.blind.train).predict, splits.blind.test),
+    threeFold: threeFoldFactor(fitLineOnly, priced),
+    mean: 0,
+  };
+  baseline.mean = (baseline.walkForward1 + baseline.walkForward2 + baseline.blind) / 3;
   const validation: ValidationRow[] = racers.map((r) => {
     const walkForward1 = medianFactor(r.fit(splits.wf1.train).predict, splits.wf1.test);
     const walkForward2 = medianFactor(r.fit(splits.wf2.train).predict, splits.wf2.test);
     const blind = medianFactor(r.fit(splits.blind.train).predict, splits.blind.test);
     const threeFold = threeFoldFactor(r.fit, priced);
+    const mean = (walkForward1 + walkForward2 + blind) / 3;
     return {
       variant: r.key,
       walkForward1,
       walkForward2,
       blind,
       threeFold,
-      mean: (walkForward1 + walkForward2 + blind) / 3,
+      mean,
+      vsBaselinePct: ((baseline.mean - mean) / baseline.mean) * 100,
       chosen: false,
     };
   });
@@ -941,15 +1000,22 @@ export function fitAll(snapshot: Snapshot): ValueModel {
   const selB = chooseBHyper(priced, asOf, ctx, selA, FEATURE_DEFS);
   const selD = chooseBHyper(priced, asOf, ctx, selA, FEATURE_DEFS_ALL);
   const selBlend = chooseBlendWeight(priced, asOf, ctx);
-  const rawA = fitRaw(priced, asOf, selA.shrink, selA.catShrink);
-  const cvLevel = crossValidate(priced, asOf, 0, selA.catShrink);
-  const cvApplied = crossValidate(priced, asOf, selA.shrink, selA.catShrink);
-  const cvFull = crossValidate(priced, asOf, 1, selA.catShrink);
+  const rawA = fitRaw(priced, asOf, selA.shrink, selA.catShrink, selA.catPower);
+  const cvLevel = crossValidate(priced, asOf, 0, selA.catShrink, selA.catPower);
+  const cvApplied = crossValidate(priced, asOf, selA.shrink, selA.catShrink, selA.catPower);
+  const cvFull = crossValidate(priced, asOf, 1, selA.catShrink, selA.catPower);
   const launch = fitLaunchModel(snapshot);
   const f3 = (x: number) => x.toFixed(3);
   const audit: AuditRow[] = [
     { term: 'TVL curve (slope & intercept)', how: `OLS of log(cap) on log(TVL) over the ${priced.length} priced comparables`, validation: 'inside every variant; the race scores it on walk-forward + blind splits' },
-    { term: 'Category offsets', how: `per-category median residual, shrunk n/(n+${selA.catShrink})`, validation: `shrinkage chosen by inner 3-fold CV over {1, 2, 4, 8, 16}: ${f3(selA.cvFactor)}x at the chosen point` },
+    {
+      term: 'Category offsets',
+      how:
+        selA.catPower === 1
+          ? `per-category median residual, shrunk n/(n+${selA.catShrink}) toward the TVL curve`
+          : `per-category median residual, shrunk (n/(n+${selA.catShrink}))^${selA.catPower} toward the TVL curve — tiered by sample size: a category fitted on one comparable keeps ${Math.round(categoryKeep(1, selA.catShrink, selA.catPower) * 100)}% of its raw offset, one on ten keeps ${Math.round(categoryKeep(10, selA.catShrink, selA.catPower) * 100)}%`,
+      validation: `shrinkage and tier power chosen jointly by inner 3-fold CV over {1, 2, 4, 8, 16} x {1, 1.5, 2, 3}: ${f3(selA.cvFactor)}x at the chosen point${selA.catPower === 1 ? '; the tiered powers were raced and did not beat the flat form' : ''}`,
+    },
     { term: 'Growth & track-record strength', how: `residual slopes applied at ${selA.shrink} of fitted strength`, validation: `strength chosen by inner 3-fold CV over {0, .125, .25, .375, .5, .75, 1}: ${f3(selA.cvFactor)}x` },
     { term: 'Category slope deviations (B, C, D)', how: `per-category residual slopes, shrunk n/(n+${selB.slopeShrink}), categories with ${SLOPE_MIN_SAMPLES}+ samples`, validation: `shrinkage chosen jointly with the ridge penalty by inner 3-fold CV: ${f3(selB.cvFactor)}x` },
     { term: 'Ridge penalty, 25-feature dictionary (B, C)', how: `lambda = ${selB.lambda}, Huber-robust (residuals past 2 log units downweighted)`, validation: `chosen by inner 3-fold CV over {1..1000} x slope shrinkage {4, 8, 16, 32}` },
@@ -983,10 +1049,12 @@ export function fitAll(snapshot: Snapshot): ValueModel {
     ageCoef: rawA.ageCoef,
     shrink: selA.shrink,
     categoryShrink: selA.catShrink,
+    categoryPower: selA.catPower,
     categories: predictor.categories,
     residQ25: quartile(globalResid.map((r) => r - median(globalResid)), 0.25),
     residQ75: quartile(globalResid.map((r) => r - median(globalResid)), 0.75),
     validation,
+    baseline,
     cv: [
       { variant: 'TVL curve + category offsets only', medianFactor: cvLevel.medianFactor, within2xPct: cvLevel.within2x * 100, within4xPct: cvLevel.within4x * 100 },
       { variant: `plus growth & track-record terms at the fitted strength (${selA.shrink})`, medianFactor: cvApplied.medianFactor, within2xPct: cvApplied.within2x * 100, within4xPct: cvApplied.within4x * 100 },
@@ -1016,7 +1084,10 @@ export function impliedFor(p: SnapshotProtocol, vm: ValueModel): Implied {
   const fit = vm.fit;
   const pred = vm.predictor.predict(p);
   const catResid = vm.residByCat.get(p.category ?? '(uncategorised)');
-  const w = catResid ? catResid.length / (catResid.length + fit.categoryShrink) : 0;
+  // The interval pools a category's spread toward the global spread at the
+  // same tiered strength the offset itself was shrunk at: a thin category
+  // borrows the global quartiles instead of trusting its own few residuals.
+  const w = catResid ? categoryKeep(catResid.length, fit.categoryShrink, fit.categoryPower) : 0;
   // The interval carries dispersion, not location: the category offset
   // already holds the location, so each category's residuals are centred
   // on their own median before their quartiles are taken (a shrunk offset
@@ -1571,54 +1642,28 @@ function coreActions(category: string | null, name: string): { text: string; ses
   }
 }
 
-/** Build one protocol's farm plan from its own snapshot figures. */
-export function farmPlan(p: SnapshotProtocol, snapshot: Snapshot): FarmPlan {
-  const mainChain = p.chains[0] ?? 'Ethereum';
-  const gas = gasFor(mainChain);
-  const cap = capitalTier(p.tvl_usd);
-  const age = ageDays(snapshot.as_of, p.listed_at);
-  const weeks = age === null ? 10 : age > 730 ? 8 : age > 365 ? 10 : 12;
-  const cores = coreActions(p.category, p.name);
-  const steps: string[] = [];
-  let cost = 0;
-  let minutes = 0;
-  const addCost = (actions: number) => { cost += actions * gas; };
-
-  steps.push(
-    `Set up one wallet dedicated to ${p.name} and fund it on ${mainChain} with ${money(cap.low)} to ${money(cap.high)} of working capital; at ${p.tvl_usd >= 1e9 ? 'its' : 'this protocol\'s'} scale that is a realistic user position, not dust. Cost: about ${money(gas * 2)} in network fees for funding and approval. Time: about 25 minutes, once.`,
-  );
-  minutes += 25;
-  addCost(2);
-  for (const core of cores) {
-    steps.push(
-      `${core.text}. Repeat across ${core.sessions} sessions over the programme. Cost: about ${money(gas)} per session in network fees. Time: about ${core.minutes} minutes per session.`,
-    );
-    minutes += core.sessions * core.minutes;
-    addCost(core.sessions);
+/** Deterministic per-row variant pick (FNV-1a over the slug). */
+function slugHash(slug: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < slug.length; i++) {
+    h ^= slug.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
   }
-  steps.push(
-    `Keep a weekly rhythm for ${weeks} weeks: one check-in to confirm the position is intact, TVL has not fallen off a cliff (the snapshot shows ${p.change_7d === null ? 'no seven-day figure reported' : `${p.change_7d.toFixed(2)}% over the last seven days`}), and no launch announcement has landed. Cost: about ${money(gas)} when a session needs a transaction. Time: about 10 minutes a week.`,
-  );
-  minutes += weeks * 10;
-  addCost(Math.ceil(weeks / 2));
-  steps.push(
-    `Stay claim-ready from week ${Math.max(2, weeks - 2)}: keep the wallet's history exportable, watch ${p.name}'s official channels for a token or points announcement, and do not consolidate funds out of the farming wallet until any snapshot date has passed. Cost: no network fees. Time: about 5 minutes a week of watching.`,
-  );
-  minutes += weeks * 5;
-  const totalCost = Math.round(cost * 100) / 100;
-  steps.push(
-    `Programme totals for ${p.name}: ${money(cap.low)} to ${money(cap.high)} of capital at work, about ${money(totalCost)} of network fees over ${weeks} weeks, and about ${(minutes / 60).toFixed(1)} hours of your time. Stop early if the protocol announces its token with a snapshot date already past, or if TVL halves from the ${money(p.tvl_usd)} the snapshot records.`,
-  );
-  return { steps, capitalUsd: cap.high, costUsd: totalCost, hours: Math.round((minutes / 60) * 10) / 10, weeks };
+  return h >>> 0;
 }
 
 /**
- * The personalised plan for a top-40 row. The category still picks the
- * core actions, but every step is assembled from this row's own fields:
- * its actual chains and their gas prices, its seven-day change setting
- * the pace and the tranche schedule, its TVL setting the tranche sizes,
- * its listing year and no-token age setting the claim-ready wording.
- * No two top-40 plans share a step text.
+ * The farm plan for one board row — every row gets this assembly, not
+ * just the top of the board. The category still picks the core actions,
+ * but every step is assembled from this row's own fields: its actual
+ * chains and their gas prices, its seven-day change setting the pace
+ * and the tranche schedule, its TVL setting the tranche sizes, its
+ * listing year and no-token age setting the claim-ready wording. The
+ * sentence skeletons themselves rotate through four phrasings picked
+ * by a hash of the slug (each step offset from the last), so even the
+ * scaffolding — funding, cost lines, check-in, claim-ready, totals —
+ * is not one template repeated down the board; every number in every
+ * variant is the row's own.
  */
 export function farmPlanPersonal(p: SnapshotProtocol, snapshot: Snapshot, rank: number): FarmPlan {
   const mainChain = p.chains[0] ?? 'Ethereum';
@@ -1637,61 +1682,121 @@ export function farmPlanPersonal(p: SnapshotProtocol, snapshot: Snapshot, rank: 
   const a3 = cap.low - a1 - a2;
   const w2 = Math.max(2, Math.ceil(weeks / 3));
   const w3 = Math.max(w2 + 1, Math.ceil((2 * weeks) / 3));
+  const v = slugHash(p.slug) % 4;
+  const alt = v % 2 === 1;
   const pacing =
     g === null
-      ? 'The snapshot reports no seven-day TVL figure for it, so the pace follows the calendar rather than flow'
+      ? alt
+        ? 'No seven-day TVL figure is reported for it, so pacing follows the calendar rather than the flow'
+        : 'The snapshot reports no seven-day TVL figure for it, so the pace follows the calendar rather than flow'
       : g > 5
-        ? `TVL rose ${g.toFixed(1)}% in the seven days before the snapshot, so the first three weeks carry double sessions while flow is rising, then the plan drops to maintenance`
+        ? alt
+          ? `With TVL up ${g.toFixed(1)}% in the seven days before the snapshot, the first three weeks carry double sessions while flow is rising, then the plan drops to maintenance`
+          : `TVL rose ${g.toFixed(1)}% in the seven days before the snapshot, so the first three weeks carry double sessions while flow is rising, then the plan drops to maintenance`
         : g < -5
-          ? `TVL fell ${Math.abs(g).toFixed(1)}% in the seven days before the snapshot, so the tranches above are also the stop rule: if TVL halves from ${money(p.tvl_usd)}, no further tranche goes in`
-          : `TVL moved ${g >= 0 ? '+' : ''}${g.toFixed(1)}% in the seven days before the snapshot — flat flow, so sessions spread evenly across the ${weeks} weeks`;
+          ? alt
+            ? `TVL fell ${Math.abs(g).toFixed(1)}% in the seven days before the snapshot; treat the tranches above as the stop rule too — if TVL halves from ${money(p.tvl_usd)}, no further tranche goes in`
+            : `TVL fell ${Math.abs(g).toFixed(1)}% in the seven days before the snapshot, so the tranches above are also the stop rule: if TVL halves from ${money(p.tvl_usd)}, no further tranche goes in`
+          : alt
+            ? `Seven-day TVL movement before the snapshot was ${g >= 0 ? '+' : ''}${g.toFixed(1)}% — flat flow, so sessions spread evenly across the ${weeks} weeks`
+            : `TVL moved ${g >= 0 ? '+' : ''}${g.toFixed(1)}% in the seven days before the snapshot — flat flow, so sessions spread evenly across the ${weeks} weeks`;
   const steps: string[] = [];
   let cost = 0;
   let minutes = 0;
 
-  steps.push(
-    `Open one wallet for ${p.name} alone and fund it on ${mainChain} in three tranches: ${money(a1)} in week 1, ${money(a2)} in week ${w2} and ${money(a3)} in week ${w3} — ${money(cap.low)} in all, rising to ${money(cap.high)} only if the first tranche behaves.${secondChain ? ` Keep about ${money(40)} of gas money on ${secondChain} as well; step 3 works there.` : ''} Cost: about ${money(gas1 * 3)} in network fees across the three fundings. Time: about 30 minutes, split across the tranche weeks.`,
-  );
+  const gasNote = secondChain ? ` Keep about ${money(40)} of gas money on ${secondChain} as well; step 3 works there.` : '';
+  const fund = [
+    `Open one wallet for ${p.name} alone and fund it on ${mainChain} in three tranches: ${money(a1)} in week 1, ${money(a2)} in week ${w2} and ${money(a3)} in week ${w3} — ${money(cap.low)} in all, rising to ${money(cap.high)} only if the first tranche behaves.${gasNote} Cost: about ${money(gas1 * 3)} in network fees across the three fundings. Time: about 30 minutes, split across the tranche weeks.`,
+    `Give ${p.name} its own wallet. On ${mainChain}, stage the capital in: ${money(a1)} in week 1, ${money(a2)} in week ${w2}, ${money(a3)} in week ${w3} — ${money(cap.low)} in total, stepping up to ${money(cap.high)} only once the first tranche has behaved.${gasNote} The three fundings cost about ${money(gas1 * 3)} in network fees; setting them up takes about 30 minutes across the tranche weeks.`,
+    `One wallet, used for ${p.name} only, funded on ${mainChain} in three tranches — ${money(a1)} (week 1), ${money(a2)} (week ${w2}), ${money(a3)} (week ${w3}) — ${money(cap.low)} of working capital, with ${money(cap.high)} as the ceiling if tranche one behaves.${gasNote} Fees for the three fundings: about ${money(gas1 * 3)}. Time: about 30 minutes, split across the tranche weeks.`,
+    `Start with a fresh wallet dedicated to ${p.name} and load it on ${mainChain} gradually: ${money(a1)} in week 1, then ${money(a2)} in week ${w2} and ${money(a3)} in week ${w3}, ${money(cap.low)} in total, rising to ${money(cap.high)} only if the first tranche behaves.${gasNote} Cost: about ${money(gas1 * 3)} in network fees across the three fundings. Time: about 30 minutes, split across the tranche weeks.`,
+  ];
+  steps.push(fund[v]!);
   minutes += 30;
   cost += 3 * gas1;
 
+  /** The cost/time tail of a core-action step, in the k-th phrasing. */
+  const tail = (sessions: number, gas: number, mins: number, k: number): string =>
+    [
+      `Repeat across ${sessions} sessions. Cost: about ${money(gas)} per session in network fees. Time: about ${mins} minutes per session.`,
+      `Run ${sessions} sessions in all; each costs about ${money(gas)} in network fees and ${mins} minutes of your time.`,
+      `Sessions: ${sessions}, at about ${money(gas)} of network fees and ${mins} minutes apiece.`,
+      `Spread over ${sessions} sessions — budget about ${money(gas)} in fees and ${mins} minutes for each.`,
+    ][k % 4]!;
+
+  /** Join a core action to its connector: dash connectors attach
+   * directly, sentence connectors need the action's full stop first. */
+  const joinCore = (text: string, conn: string): string =>
+    conn.startsWith(' —') ? text + conn : text + (text.endsWith('.') ? '' : '.') + conn;
+
   const c0 = cores[0]!;
-  steps.push(
-    `${c0.text} — run it on ${mainChain}, where a session costs about ${money(gas1)} in fees. ${pacing}. Repeat across ${c0.sessions} sessions. Cost: about ${money(gas1)} per session. Time: about ${c0.minutes} minutes per session.`,
-  );
+  const conn0 = [
+    ` — run it on ${mainChain}, where a session costs about ${money(gas1)} in fees. ${pacing}.`,
+    ` Do it on ${mainChain}; a session there costs about ${money(gas1)} in fees. ${pacing}.`,
+    ` — all of it on ${mainChain}, at about ${money(gas1)} a session in fees. ${pacing}.`,
+    ` Keep this leg on ${mainChain} (about ${money(gas1)} in fees per session). ${pacing}.`,
+  ];
+  steps.push(`${joinCore(c0.text, conn0[v]!)} ${tail(c0.sessions, gas1, c0.minutes, v)}`);
   minutes += c0.sessions * c0.minutes;
   cost += c0.sessions * gas1;
 
   const c1 = cores[1]!;
   if (secondChain) {
-    steps.push(
-      `${c1.text} — this leg runs on ${secondChain} (about ${money(gas2)} a session), which is why the wallet keeps a balance there. Repeat across ${c1.sessions} sessions. Cost: about ${money(gas2)} per session. Time: about ${c1.minutes} minutes per session.`,
-    );
+    const conn1 = [
+      ` — this leg runs on ${secondChain} (about ${money(gas2)} a session), which is why the wallet keeps a balance there.`,
+      ` Run this leg on ${secondChain} instead — about ${money(gas2)} a session, and the reason the wallet keeps a balance there.`,
+      ` — the ${secondChain} leg: about ${money(gas2)} a session there, funded by the balance step 1 leaves on that chain.`,
+      ` This one belongs on ${secondChain} (about ${money(gas2)} a session); the gas money set aside in step 1 covers it.`,
+    ];
+    steps.push(`${joinCore(c1.text, conn1[(v + 1) % 4]!)} ${tail(c1.sessions, gas2, c1.minutes, v + 1)}`);
     cost += c1.sessions * gas2;
   } else {
-    steps.push(
-      `${c1.text} — ${p.name} lives only on ${mainChain} in this snapshot, so both legs share one chain and one gas budget. Repeat across ${c1.sessions} sessions. Cost: about ${money(gas1)} per session. Time: about ${c1.minutes} minutes per session.`,
-    );
+    const conn1 = [
+      ` — ${p.name} lives only on ${mainChain} in this snapshot, so both legs share one chain and one gas budget.`,
+      ` The snapshot lists ${p.name} on ${mainChain} only, so this leg shares the same chain and gas budget as the first.`,
+      ` — same chain as the first leg (${mainChain} is the only one the snapshot records), so one gas budget covers both.`,
+      ` Both legs sit on ${mainChain} — the snapshot records no second chain — under one gas budget.`,
+    ];
+    steps.push(`${joinCore(c1.text, conn1[(v + 1) % 4]!)} ${tail(c1.sessions, gas1, c1.minutes, v + 1)}`);
     cost += c1.sessions * gas1;
   }
   minutes += c1.sessions * c1.minutes;
 
-  steps.push(
-    `Across the ${weeks} weeks, check in once a week on the position${secondChain ? ` on both ${mainChain} and ${secondChain}` : ''}: confirm TVL has not broken down (the snapshot records ${money(p.tvl_usd)}${g !== null ? `, ${g >= 0 ? 'up' : 'down'} ${Math.abs(g).toFixed(1)}% on the week` : ''}) and ${years !== null ? `remember the position's premise — ${years.toFixed(1)} years recorded with no token` : 'note any listing or token announcement, since no listing date is recorded'}. Cost: about ${money(gas1)} when a check needs a transaction. Time: about 10 minutes a week.`,
-  );
+  const bothChains = secondChain ? ` on both ${mainChain} and ${secondChain}` : '';
+  const tvlPhrase = `${money(p.tvl_usd)}${g !== null ? `, ${g >= 0 ? 'up' : 'down'} ${Math.abs(g).toFixed(1)}% on the week` : ''}`;
+  const premise = years !== null ? `remember the position's premise — ${years.toFixed(1)} years recorded with no token` : 'note any listing or token announcement, since no listing date is recorded';
+  const checkin = [
+    `Across the ${weeks} weeks, check in once a week on the position${bothChains}: confirm TVL has not broken down (the snapshot records ${tvlPhrase}) and ${premise}. Cost: about ${money(gas1)} when a check needs a transaction. Time: about 10 minutes a week.`,
+    `Once a week for the ${weeks} weeks, spend ten minutes on the position${bothChains}: check that TVL is holding (the snapshot records ${tvlPhrase}) and ${premise}. Cost: about ${money(gas1)} when a check needs a transaction.`,
+    `Weekly, across the ${weeks} weeks: confirm the position${bothChains} is intact, TVL has not broken down from the ${tvlPhrase} the snapshot records, and ${premise}. Cost: about ${money(gas1)} when a check needs a transaction. Time: about 10 minutes a week.`,
+    `Put a ten-minute check on the calendar every week of the ${weeks}${bothChains}: position intact, TVL not collapsing from the ${tvlPhrase} recorded, and ${premise}. Cost: about ${money(gas1)} when a check needs a transaction.`,
+  ];
+  steps.push(checkin[(v + 2) % 4]!);
   minutes += weeks * 10;
   cost += Math.ceil(weeks / 2) * gas1;
 
-  steps.push(
-    `Stay claim-ready from week ${Math.max(2, weeks - 2)}: ${listedYear ? `${p.name} has been recorded since ${listedYear} with no token, so any announcement is its first` : 'no listing date is recorded for it, so watch its official channels directly rather than calendars'}; keep the wallet's history exportable and do not consolidate funds out of the farming wallet until any snapshot date has passed. Cost: no network fees. Time: about 5 minutes a week of watching.`,
-  );
+  const listed = listedYear ? `${p.name} has been recorded since ${listedYear} with no token, so any announcement is its first` : 'no listing date is recorded for it, so watch its official channels directly rather than calendars';
+  const listedCap = listed.charAt(0).toUpperCase() + listed.slice(1);
+  const claimFrom = Math.max(2, weeks - 2);
+  const claim = [
+    `Stay claim-ready from week ${claimFrom}: ${listed}; keep the wallet's history exportable and do not consolidate funds out of the farming wallet until any snapshot date has passed. Cost: no network fees. Time: about 5 minutes a week of watching.`,
+    `From week ${claimFrom}, keep the wallet claim-ready: ${listed}; leave the funds unconsolidated until any snapshot date has passed, and keep the wallet's history exportable. Watching costs about 5 minutes a week and no network fees.`,
+    `Claim readiness starts at week ${claimFrom}. ${listedCap}; the wallet's history stays exportable and nothing consolidates out of it until any snapshot date has passed. Cost: no network fees. Time: about 5 minutes a week of watching.`,
+    `In the last stretch (from week ${claimFrom}), watch for the announcement: ${listed}; do not consolidate funds out of the farming wallet until any snapshot date has passed, and keep its history exportable. Cost: no network fees. Time: about 5 minutes a week of watching.`,
+  ];
+  steps.push(claim[(v + 3) % 4]!);
   minutes += weeks * 5;
 
   const totalCost = Math.round(cost * 100) / 100;
   const hours = Math.round((minutes / 60) * 10) / 10;
-  steps.push(
-    `Programme totals for ${p.name} (board rank ${rank}): ${money(cap.low)} to ${money(cap.high)} of capital in the tranches above, about ${money(totalCost)} of network fees over ${weeks} weeks, and about ${hours.toFixed(1)} hours of your time. Stop early if the token is announced with a snapshot date already past, or if TVL halves from the ${money(p.tvl_usd)} recorded here.`,
-  );
+  const stopRule = `Stop early if the token is announced with a snapshot date already past, or if TVL halves from the ${money(p.tvl_usd)} recorded here.`;
+  const totals = [
+    `Programme totals for ${p.name} (board rank ${rank}): ${money(cap.low)} to ${money(cap.high)} of capital in the tranches above, about ${money(totalCost)} of network fees over ${weeks} weeks, and about ${hours.toFixed(1)} hours of your time. ${stopRule}`,
+    `The programme in one line — ${p.name}, board rank ${rank}: ${money(cap.low)} to ${money(cap.high)} of capital in the tranches above, about ${money(totalCost)} of network fees over ${weeks} weeks, ${hours.toFixed(1)} hours of your time. ${stopRule}`,
+    `Adding it up for ${p.name} (rank ${rank}): capital ${money(cap.low)} to ${money(cap.high)} in the tranches above; fees about ${money(totalCost)} over ${weeks} weeks; your time about ${hours.toFixed(1)} hours. ${stopRule}`,
+    `${p.name}'s totals (board rank ${rank}): ${money(cap.low)} to ${money(cap.high)} of capital in the tranches above, about ${money(totalCost)} of network fees over ${weeks} weeks, and about ${hours.toFixed(1)} hours of your time. ${stopRule}`,
+  ];
+  steps.push(totals[v]!);
   return { steps, capitalUsd: cap.high, costUsd: totalCost, hours, weeks };
 }
 
@@ -1710,31 +1815,49 @@ function stepWordSet(steps: string[]): Set<string> {
 
 /**
  * Mean pairwise Jaccard similarity of farm-step word bigrams, over the
- * whole board and over the top 40. Printed on the dashboard: a board
- * whose plans are one template with swapped numbers keeps the same word
- * sequences and scores high; per-row assembly breaks the sequences and
- * pulls the number down.
+ * whole board and over the worst window of 40 consecutive rows by rank.
+ * Printed on the dashboard: a board whose plans are one template with
+ * swapped numbers keeps the same word sequences and scores high;
+ * per-row assembly breaks the sequences and pulls the number down.
+ * The worst window is the honest version of the check: a board mean
+ * can hide a templated stretch, the worst 40-row window cannot.
  */
-export function farmSimilarity(rows: { farm_steps: string[] }[]): { board: number; top40: number } {
+export function farmSimilarity(rows: { farm_steps: string[] }[]): { board: number; worst40: number } {
   const sets = rows.map((r) => stepWordSet(r.farm_steps));
-  const mean = (list: Set<string>[]) => {
-    if (list.length < 2) return 0;
-    let sum = 0;
-    let n = 0;
-    for (let i = 0; i < list.length; i++) {
-      for (let j = i + 1; j < list.length; j++) {
-        const a = list[i]!;
-        const b = list[j]!;
-        const [small, big] = a.size < b.size ? [a, b] : [b, a];
-        let inter = 0;
-        for (const w of small) if (big.has(w)) inter++;
-        sum += inter / (a.size + b.size - inter);
-        n++;
-      }
+  const n = sets.length;
+  const pair = new Float64Array(n * n);
+  let boardSum = 0;
+  let boardCount = 0;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const a = sets[i]!;
+      const b = sets[j]!;
+      const [small, big] = a.size < b.size ? [a, b] : [b, a];
+      let inter = 0;
+      for (const w of small) if (big.has(w)) inter++;
+      const sim = inter / (a.size + b.size - inter);
+      pair[i * n + j] = sim;
+      boardSum += sim;
+      boardCount++;
     }
-    return Math.round((sum / n) * 1000) / 1000;
-  };
-  return { board: mean(sets), top40: mean(sets.slice(0, 40)) };
+  }
+  const width = Math.min(40, n);
+  let worst = 0;
+  if (width >= 2) {
+    for (let start = 0; start + width <= n; start++) {
+      let sum = 0;
+      let cnt = 0;
+      for (let i = start; i < start + width; i++) {
+        for (let j = i + 1; j < start + width; j++) {
+          sum += pair[i * n + j]!;
+          cnt++;
+        }
+      }
+      if (cnt > 0) worst = Math.max(worst, sum / cnt);
+    }
+  }
+  const r3 = (x: number) => Math.round(x * 1000) / 1000;
+  return { board: r3(boardCount ? boardSum / boardCount : 0), worst40: r3(worst) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1800,16 +1923,18 @@ export interface RadarData {
     ageCoefPerYear: number;
     shrink: number;
     categoryShrink: number;
+    categoryPower: number;
     residQ25: number;
     residQ75: number;
     holdoutMedianFactor: number;
-    validation: { variant: string; walkForward1: number; walkForward2: number; blind: number; threeFold: number; mean: number; chosen: boolean }[];
+    validation: { variant: string; walkForward1: number; walkForward2: number; blind: number; threeFold: number; mean: number; vsBaselinePct: number; chosen: boolean }[];
+    baseline: { walkForward1: number; walkForward2: number; blind: number; threeFold: number; mean: number };
     cv: CvRow[];
     categories: { category: string; samples: number; multiple: number; slope: number | null }[];
     launch: LaunchFitInfo;
     verdicts: { go: number; selective: number; skip: number; medianEfficiency: number; p25Efficiency: number; p90Efficiency: number; timeUsdPerHour: number };
     audit: AuditRow[];
-    farmSimilarity: { board: number; top40: number };
+    farmSimilarity: { board: number; worst40: number };
   };
   rows: RadarRow[];
   live: LiveRow[];
@@ -1852,9 +1977,17 @@ interface Scored {
 
 function verdictSentence(s: Scored, medianEfficiency: number): string {
   const label = s.verdict === 'go' ? 'GO' : s.verdict === 'selective' ? 'SELECTIVE' : 'SKIP';
-  return (
-    ` Verdict: ${label} - ${Math.round(s.prob * 100)}% fitted launch odds x ${money(s.imp.value)} implied = ${money(s.ev)} probability-weighted value; ${money(s.efficiency)} per $1 of full cost (${money(s.plan.costUsd)} fees + ${s.plan.hours.toFixed(1)}h at $${TIME_USD_PER_HOUR}/h), board median ${money(medianEfficiency)}.`
-  );
+  const prob = `${Math.round(s.prob * 100)}%`;
+  const costed = `${money(s.plan.costUsd)} fees + ${s.plan.hours.toFixed(1)}h at $${TIME_USD_PER_HOUR}/h`;
+  // The same arithmetic in three sentence skeletons, rotated by slug:
+  // the verdict line is part of every plan's last step, so its phrasing
+  // rotates with the rest of the scaffolding.
+  const forms = [
+    ` Verdict: ${label} - ${prob} fitted launch odds x ${money(s.imp.value)} implied = ${money(s.ev)} probability-weighted value; ${money(s.efficiency)} per $1 of full cost (${costed}), board median ${money(medianEfficiency)}.`,
+    ` Verdict: ${label}. The arithmetic: ${prob} fitted launch odds on ${money(s.imp.value)} of implied value gives ${money(s.ev)} probability-weighted; against the full cost (${costed}) that is ${money(s.efficiency)} per $1, where the board median is ${money(medianEfficiency)}.`,
+    ` Verdict: ${label} — priced from this row alone: ${money(s.ev)} of probability-weighted value (${prob} odds x ${money(s.imp.value)} implied), or ${money(s.efficiency)} per $1 of full cost (${costed}); the board median is ${money(medianEfficiency)}.`,
+  ];
+  return forms[slugHash(s.p.slug) % 3]!;
 }
 
 /** Score every pre-token protocol and build the ranked board plus page data. */
@@ -1865,28 +1998,26 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
   const peerIndex = buildPeerIndex(snapshot);
   const watch = new Set(snapshot.watchlist);
   const subjects = snapshot.protocols.filter((p) => isRankable(p) && p.tvl_usd > 0);
-  const scored: Scored[] = subjects
+  const prescored = subjects
     .map((p) => {
       const imp = impliedFor(p, vm);
-      const plan = farmPlan(p, snapshot);
       const prob = launch.predict(p);
-      const fullCost = plan.costUsd + plan.hours * TIME_USD_PER_HOUR;
-      const ev = prob * imp.value;
-      return { p, imp, plan, prob, ev, fullCost, efficiency: fullCost > 0 ? ev / fullCost : 0, verdict: 'skip' as Verdict };
+      return { p, imp, prob, ev: prob * imp.value };
     })
     .sort((a, b) => b.imp.value - a.imp.value || (a.p.slug < b.p.slug ? -1 : 1));
-  const chosen = scored.slice(0, BOARD_TARGET);
-  for (const s of scored) {
-    if (watch.has(s.p.slug) && !chosen.includes(s)) chosen.push(s);
+  const chosenPre = prescored.slice(0, BOARD_TARGET);
+  for (const s of prescored) {
+    if (watch.has(s.p.slug) && !chosenPre.includes(s)) chosenPre.push(s);
   }
-  chosen.sort((a, b) => b.imp.value - a.imp.value || (a.p.slug < b.p.slug ? -1 : 1));
-  // The top 40 rows get the personalised plan assembly (their own chains,
-  // growth pace, tranche schedule and listing year in every step); the
-  // plan's cost and hours feed the verdict, so this happens before it.
-  chosen.forEach((s, i) => {
-    if (i < 40) s.plan = farmPlanPersonal(s.p, snapshot, i + 1);
-    s.fullCost = s.plan.costUsd + s.plan.hours * TIME_USD_PER_HOUR;
-    s.efficiency = s.fullCost > 0 ? s.ev / s.fullCost : 0;
+  chosenPre.sort((a, b) => b.imp.value - a.imp.value || (a.p.slug < b.p.slug ? -1 : 1));
+  // Every chosen row gets the per-row plan assembly (its own chains,
+  // growth pace, tranche schedule and listing year in every step, with
+  // the sentence skeletons rotated per row); the plan's cost and hours
+  // feed the verdict, so assembly happens before verdicts are struck.
+  const chosen: Scored[] = chosenPre.map((s, i) => {
+    const plan = farmPlanPersonal(s.p, snapshot, i + 1);
+    const fullCost = plan.costUsd + plan.hours * TIME_USD_PER_HOUR;
+    return { ...s, plan, fullCost, efficiency: fullCost > 0 ? s.ev / fullCost : 0, verdict: 'skip' as Verdict };
   });
   const effValues = chosen.map((s) => s.efficiency);
   const effMedian = quartile(effValues, 0.5);
@@ -1969,6 +2100,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       ageCoefPerYear: Math.round(fit.ageCoef * 10000) / 10000,
       shrink: fit.shrink,
       categoryShrink: fit.categoryShrink,
+      categoryPower: fit.categoryPower,
       residQ25: Math.round(fit.residQ25 * 1000) / 1000,
       residQ75: Math.round(fit.residQ75 * 1000) / 1000,
       holdoutMedianFactor: Math.round(fit.holdoutMedianFactor * 100) / 100,
@@ -1979,8 +2111,16 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
         blind: Math.round(v.blind * 100) / 100,
         threeFold: Math.round(v.threeFold * 100) / 100,
         mean: Math.round(v.mean * 100) / 100,
+        vsBaselinePct: Math.round(v.vsBaselinePct * 10) / 10,
         chosen: v.chosen,
       })),
+      baseline: {
+        walkForward1: Math.round(fit.baseline.walkForward1 * 100) / 100,
+        walkForward2: Math.round(fit.baseline.walkForward2 * 100) / 100,
+        blind: Math.round(fit.baseline.blind * 100) / 100,
+        threeFold: Math.round(fit.baseline.threeFold * 100) / 100,
+        mean: Math.round(fit.baseline.mean * 100) / 100,
+      },
       cv: fit.cv.map((c) => ({ variant: c.variant, medianFactor: Math.round(c.medianFactor * 100) / 100, within2xPct: Math.round(c.within2xPct), within4xPct: Math.round(c.within4xPct) })),
       categories: fit.categories
         .filter((c) => c.samples >= 1)

@@ -90,7 +90,7 @@ if (pageBytes > TEXT_MAX_BYTES - 4096) {
 }
 const shots = copyFiles(join(here, 'screenshots'), join(out, 'screenshots'));
 if (shots.length < 3) {
-  process.stderr.write(`token radar: screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 3, the board, a detail view and a filtered view\n`);
+  process.stderr.write(`token radar: screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 3, the board, a detail view and a compare view\n`);
   process.exit(1);
 }
 for (const name of shots) {
@@ -107,7 +107,7 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols scanned, ${radar.counts.preToken} record no token, ${radar.counts.eligible} launch candidates ranked, ${radar.counts.pricedComps} priced comparables fitted\n` +
     `token radar: board of ${board.length} rows, all ${snapshot.watchlist.length} watchlist protocols covered, holdout median factor ${radar.model.holdoutMedianFactor}\n` +
-    `token radar: value model variant ${radar.model.variant} (${radar.model.featureCount} fitted terms); launch-odds ${radar.model.launch.spec} specification${radar.model.launch.calibrated ? ', Platt-calibrated' : ''}, holdout AUC ${radar.model.launch.auc} (other specification ${radar.model.launch.aucOther}), Brier ${radar.model.launch.brier}; verdicts go ${radar.model.verdicts.go} / selective ${radar.model.verdicts.selective} / skip ${radar.model.verdicts.skip}; farm-step similarity ${radar.model.farmSimilarity.board} board / ${radar.model.farmSimilarity.top40} top-40\n` +
+    `token radar: value model variant ${radar.model.variant} (${radar.model.featureCount} fitted terms); launch-odds ${radar.model.launch.spec} specification${radar.model.launch.calibrated ? ', Platt-calibrated' : ''}, holdout AUC ${radar.model.launch.auc} (other specification ${radar.model.launch.aucOther}), Brier ${radar.model.launch.brier}; verdicts go ${radar.model.verdicts.go} / selective ${radar.model.verdicts.selective} / skip ${radar.model.verdicts.skip}; farm-step similarity ${radar.model.farmSimilarity.board} board / ${radar.model.farmSimilarity.worst40} worst 40-row window\n` +
     `token radar: top of the board: ${board.slice(0, 3).map((r) => `#${r.rank} ${r.slug} $${r.implied_value_usd.toLocaleString('en-US')}`).join('; ')}\n` +
     `token radar: wrote board.json, data.js, dashboard/ (${pageFiles.length} files, ${pageBytes} source bytes), screenshots/ (${shots.length} images) and dossier.json under ${out}\n`,
 );

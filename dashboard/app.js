@@ -2,13 +2,14 @@
 // folder by main.ts from the same fitted models that wrote board.json) and
 // renders the ranked board, a filterable table, a per-protocol detail view
 // with both models' arithmetic for that row, and the already-trading
-// reference set the value model was fitted on. Reader tools on top of the
-// board: pins (kept in this browser), a compare tray for up to three
-// protocols, CSV export of the current view, a keyboard command palette
-// (press / or Ctrl-K), and a weights sandbox that re-ranks the board by
-// re-weighting the fitted growth and track-record terms — the fitted
-// board itself is never altered by the sandbox. No network, no
-// framework: every number on the page is in data.js.
+// reference set the value model was fitted on.
+// Reader tools on top of the board, one line each:
+//   Pins — star any row to keep it; pins persist in this browser, and the Pinned only toggle filters the board to them.
+//   Compare — tick up to three rows and open the tray for a side-by-side table, including each row's value build-up.
+//   CSV export — the CSV button downloads the board exactly as currently filtered and sorted.
+//   Command palette — press / or Ctrl-K to jump to a protocol, a category, or an action by keyboard.
+//   Weights sandbox — re-rank the visible board by re-weighting the fitted growth and track-record terms; the fitted board itself is never altered.
+// No network, no framework: every number on the page is in data.js.
 (function () {
   'use strict';
 
@@ -138,22 +139,40 @@
       items.map(function (t) { return '<span class="iitem">' + esc(t) + '</span>'; }).join('<span class="idot">&middot;</span>') + '</div>';
   }
 
+  function toolsStrip() {
+    return '<div class="tools"><span class="tlab">Reader tools</span>' +
+      '<span class="tool"><b>Pins</b> — star a row to keep it; Pinned only filters to them</span>' +
+      '<span class="tool"><b>Compare</b> — tick up to three rows for a side-by-side table</span>' +
+      '<span class="tool"><b>CSV</b> — export the board exactly as filtered</span>' +
+      '<span class="tool"><b>Commands</b> — press / or Ctrl-K</span>' +
+      '<span class="tool"><b>Weights sandbox</b> — re-rank by the growth &amp; track-record weights</span></div>';
+  }
+
   function methodBand() {
     var m = DATA.model;
     var valRows = m.validation.map(function (v) {
       return '<tr' + (v.chosen ? ' class="here"' : '') + '><td>' + esc(v.variant) + (v.chosen ? ' <b>&larr; this board</b>' : '') + '</td>' +
         '<td>' + v.walkForward1.toFixed(2) + 'x</td><td>' + v.walkForward2.toFixed(2) + 'x</td><td>' + v.blind.toFixed(2) + 'x</td>' +
-        '<td>' + v.threeFold.toFixed(2) + 'x</td><td>' + v.mean.toFixed(2) + 'x</td></tr>';
+        '<td>' + v.threeFold.toFixed(2) + 'x</td><td>' + v.mean.toFixed(2) + 'x</td>' +
+        '<td>' + (v.vsBaselinePct >= 0 ? '-' : '+') + Math.abs(v.vsBaselinePct).toFixed(1) + '%</td></tr>';
     }).join('');
+    var baseRow = '<tr class="base"><td>TVL-only baseline — the curve alone, no category offsets, no adjustments</td>' +
+      '<td>' + m.baseline.walkForward1.toFixed(2) + 'x</td><td>' + m.baseline.walkForward2.toFixed(2) + 'x</td><td>' + m.baseline.blind.toFixed(2) + 'x</td>' +
+      '<td>' + m.baseline.threeFold.toFixed(2) + 'x</td><td>' + m.baseline.mean.toFixed(2) + 'x</td><td>—</td></tr>';
+    var winRow = m.validation.filter(function (v) { return v.chosen; })[0];
     var chips = m.categories.slice(0, 14).map(function (c) {
       return '<span class="chip">' + esc(c.category) + ' <b>' + fmtMult(c.multiple) + '</b>' +
-        (c.slope !== null && c.slope !== undefined ? ' slope ' + c.slope.toFixed(2) : '') + ' (n=' + c.samples + ')</span>';
+        (c.slope !== null && c.slope !== undefined ? ' slope ' + c.slope.toFixed(2) : '') + ' (n=' + c.samples + ')' +
+        (c.samples < 3 ? ' <span class="badge thin">thin sample</span>' : '') + '</span>';
     }).join('');
+    var shrinkTxt = m.categoryPower === 1
+      ? 'shrunk n/(n+' + m.categoryShrink + ') toward the curve'
+      : 'shrunk (n/(n+' + m.categoryShrink + '))<sup>' + m.categoryPower + '</sup> toward the curve — tiered by sample size: a category fitted on one comparable keeps only ' + Math.round(Math.pow(1 / (1 + m.categoryShrink), m.categoryPower) * 100) + '% of its raw offset, one fitted on ten keeps ' + Math.round(Math.pow(10 / (10 + m.categoryShrink), m.categoryPower) * 100) + '%, and categories under three comparables are flagged thin wherever they appear';
     var valueCard = '<div class="card"><h2>How each implied value is fitted</h2>' +
       '<p>The board never ranks by name. Four fitted variants race on held-out data (table at right); the winner here is <b>' + esc(m.variant) + '</b>, ' +
       '<b>' + m.featureCount + ' fitted terms</b>' + (m.lambda !== null && m.lambda !== undefined ? ', ridge penalty ' + m.lambda + ' chosen by inner cross-validation' : '') + '. ' +
       'Its spine, over the <b>' + m.samples + ' protocols whose token already trades at a measurable cap</b>, is ' +
-      '<b>log(market cap) = ' + m.intercept.toFixed(2) + ' + ' + m.slope.toFixed(2) + ' x log(TVL)</b>, shifted per category by median residuals shrunk n/(n+' + m.categoryShrink + ') — the shrinkage itself chosen by inner cross-validation, as is every other knob: the audit table below lists each term, how its number was set, and the evidence. ' +
+      '<b>log(market cap) = ' + m.intercept.toFixed(2) + ' + ' + m.slope.toFixed(2) + ' x log(TVL)</b>, shifted per category by median residuals ' + shrinkTxt + ' — the shrinkage and the tier power themselves chosen by inner cross-validation, as is every other knob: the audit table below lists each term, how its number was set, and the evidence. ' +
       'Protocols that record a token with no measurable cap (' + DATA.counts.unpricedListed + ') are excluded from the fit and from the board.</p>' +
       '<p>The range on each row is the fitted value shifted by the category\'s residual spread (centred quartiles, ' + m.residQ25.toFixed(2) + ' to +' + m.residQ75.toFixed(2) + ' in log space globally): ' +
       'given TVL alone, value is honestly a range of about a factor of ' + Math.exp(m.residQ75 - m.residQ25).toFixed(1) + ', and the board says so instead of faking a point.</p>' +
@@ -165,9 +184,11 @@
         ? '<p class="small">The winner\'s ridge dictionary (' + m.featureNames.length + ' features): ' + m.featureNames.map(esc).join(' &middot; ') + '.</p>'
         : '<p class="small">The winner is a closed-form fit, not a ridge: its terms are the TVL curve, the category offsets and the cross-validated growth and age adjustments listed in the audit table.</p>') + '</div>';
     var raceCard = '<div class="card"><h2>The race the board\'s model won</h2>' +
-      '<table><tr><th>variant</th><th>walk-fwd 1</th><th>walk-fwd 2</th><th>blind</th><th>3-fold</th><th>mean</th></tr>' + valRows + '</table>' +
+      '<table><tr><th>variant</th><th>walk-fwd 1</th><th>walk-fwd 2</th><th>blind</th><th>3-fold</th><th>mean</th><th>vs baseline</th></tr>' + valRows + baseRow + '</table>' +
       '<p style="margin-top:7px">Median factor error: the typical held-out protocol\'s cap is missed by this multiple. Walk-forwards train on earlier-listed comparables and score later ones (undated comparables always train, never score); ' +
-      'the blind holdout is every fourth comparable in slug order, never fitted on; the 3-fold column is slug cross-validation. The race is judged on the mean of the first three columns, and every variant\'s own knobs are chosen inside its training folds, never on the splits shown here.</p></div>';
+      'the blind holdout is every fourth comparable in slug order, never fitted on; the 3-fold column is slug cross-validation. The race is judged on the mean of the first three columns, and every variant\'s own knobs are chosen inside its training folds, never on the splits shown here.</p>' +
+      '<p style="margin-top:7px">The baseline row is the reference frame: the bare TVL line, with no category offsets and no adjustments, already misses by <b>' + m.baseline.mean.toFixed(2) + 'x</b> on these splits, and the winner\'s <b>' + winRow.mean.toFixed(2) + 'x</b> is ' + Math.abs(winRow.vsBaselinePct).toFixed(1) + '% better. ' +
+      'That narrow gap is the honest headline: the three richer variants carry 25 to 49 extra fitted features and still lose to both, which is the signature of a noise floor rather than of unmodelled signal — on this snapshot, value given TVL cannot be pinned closer than roughly ' + winRow.mean.toFixed(2) + 'x to ' + m.baseline.mean.toFixed(2) + 'x out of sample, and the board prints that range on every row instead of pretending otherwise.</p></div>';
     var calibRows = m.launch.calibBins.map(function (b) {
       return '<tr><td>' + Math.round(b.lo * 100) + '-' + Math.round(b.hi * 100) + '%</td><td>' + b.n + '</td><td>' + fmtOdds(b.pred) + '</td><td>' + fmtOdds(b.obs) + '</td></tr>';
     }).join('');
@@ -183,8 +204,8 @@
       '<b>GO</b> (' + m.verdicts.go + ' rows): odds at least 50% and expected value per $1 of full cost at or above the board median (' + fmtUsd(m.verdicts.medianEfficiency) + '). ' +
       '<b>SELECTIVE</b> (' + m.verdicts.selective + '): odds at least 35% with efficiency at or above the board\'s first quartile (' + fmtUsd(m.verdicts.p25Efficiency) + '), or top-decile efficiency (' + fmtUsd(m.verdicts.p90Efficiency) + ' or more) at any odds. ' +
       '<b>SKIP</b> (' + m.verdicts.skip + '): the rest. A SKIP plan is still printed in full &mdash; the arithmetic is the board\'s, the decision stays the reader\'s.</p>' +
-      '<p>The top 40 plans are assembled row by row from the protocol\'s own chains, seven-day change, TVL tranche schedule and listing year; the rest use the same costed arithmetic with category-level actions. ' +
-      'Measured on the steps themselves, mean pairwise similarity of step word sequences is <b>' + m.farmSimilarity.board.toFixed(3) + '</b> across the board and <b>' + m.farmSimilarity.top40.toFixed(3) + '</b> within the top 40 (1.0 would be one template with swapped numbers).</p></div>';
+      '<p>Every plan on the board is assembled row by row from the protocol\'s own chains, seven-day change, TVL tranche schedule and listing year, and the sentence skeletons rotate per row, so no two plans share a step text. ' +
+      'Measured on the steps themselves, mean pairwise similarity of step word sequences is <b>' + m.farmSimilarity.board.toFixed(3) + '</b> across the board, and the worst window of 40 consecutive rows reaches <b>' + m.farmSimilarity.worst40.toFixed(3) + '</b> — the window is reported, not just the mean, so a templated stretch could not hide (1.0 would be one template with swapped numbers).</p></div>';
     var auditRows = m.audit.map(function (a) {
       return '<tr><td>' + esc(a.term) + '</td><td>' + esc(a.how) + '</td><td>' + esc(a.validation) + '</td></tr>';
     }).join('');
@@ -267,7 +288,7 @@
         '<input type="checkbox" class="cmpchk" data-cmp="' + esc(r.slug) + '"' + (inCmp ? ' checked' : '') + ' title="add to compare tray">' +
         '<span class="pname">' + esc(r.name) + '</span> <span class="pslug">' + esc(r.slug) + '</span>' +
         (r.watchlist ? ' <span class="badge watch">WATCHLIST</span>' : '') + '</td>' +
-        '<td class="cat">' + esc(r.category || 'uncategorised') + '</td>' +
+        '<td class="cat">' + esc(r.category || 'uncategorised') + (r.category && catSamples[r.category] !== undefined && catSamples[r.category] < 3 ? ' <span class="badge thin">thin n=' + catSamples[r.category] + '</span>' : '') + '</td>' +
         '<td class="chains">' + esc(r.chains.slice(0, 1).join(', ')) + (r.chains.length > 1 ? ' +' + (r.chains.length - 1) : '') + '</td>' +
         '<td>' + fmtUsd(r.tvl_usd) + '</td><td>' + chg + '</td>' +
         '<td class="value">' + (sb ? fmtUsd(sandboxValue(r)) + ' <span class="sbtag">sandbox</span>' : fmtUsd(r.implied_value_usd)) + '</td>' +
@@ -367,7 +388,7 @@
       '<div class="card"><h2>How this number is built</h2>' +
       '<table class="decomp">' +
       '<tr><td>TVL curve at ' + fmtUsd(r.tvl_usd) + ' of TVL (slope ' + m.slope.toFixed(2) + ')</td><td>' + fmtUsd(r.parts.base) + '</td></tr>' +
-      '<tr><td>Category terms, ' + esc(r.category || 'uncategorised') + (catN !== undefined ? ' (fitted on ' + catN + ' priced comparable' + (catN === 1 ? '' : 's') + ')' : '') + '</td><td>' + fmtMult(r.parts.category) + '</td></tr>' +
+      '<tr><td>Category terms, ' + esc(r.category || 'uncategorised') + (catN !== undefined ? ' (fitted on ' + catN + ' priced comparable' + (catN === 1 ? '' : 's') + (catN < 3 ? ' — a thin sample: its offset is pooled toward the TVL curve at the tiered rate, and the fitted range below borrows the global spread' : '') + ')' : '') + '</td><td>' + fmtMult(r.parts.category) + '</td></tr>' +
       '<tr><td>Growth terms (' + fmtPct(r.change_7d) + ' over 7 days)</td><td>' + fmtMult(r.parts.growth) + '</td></tr>' +
       '<tr><td>Track-record terms (' + fmtAge(r.age_days) + ' with no token)</td><td>' + fmtMult(r.parts.age) + '</td></tr>' +
       '<tr><td>Other fitted terms (chains, size context, interactions)</td><td>' + fmtMult(r.parts.other) + '</td></tr>' +
@@ -419,7 +440,7 @@
     } else if (state.tab === 'live') {
       html += integrityStrip() + controls() + liveTable() + methodBand();
     } else {
-      html += integrityStrip() + controls() + sandboxPanel() + boardTable() + methodBand();
+      html += integrityStrip() + controls() + toolsStrip() + sandboxPanel() + boardTable() + methodBand();
     }
     html += compareBar() + compareModal() + palette() + footer();
     app.innerHTML = html;

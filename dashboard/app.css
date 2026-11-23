@@ -100,6 +100,11 @@ table.board tbody tr:hover { background: #16223a; }
 .pslug { color: var(--faint); font-size: 12px; }
 .badge { display: inline-block; border-radius: 4px; padding: 0 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.4px; }
 .badge.watch { background: rgba(45, 212, 191, 0.14); color: var(--teal); border: 1px solid rgba(45, 212, 191, 0.4); }
+.badge.thin { background: rgba(242, 181, 68, 0.13); color: var(--amber); border: 1px solid rgba(242, 181, 68, 0.45); font-size: 10px; white-space: nowrap; }
+.tools { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 14px; background: var(--panel2); border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 12px; margin-bottom: 10px; font-size: 12.5px; color: var(--muted); }
+.tools .tlab { color: var(--teal); font-weight: 700; text-transform: uppercase; letter-spacing: 0.7px; font-size: 11.5px; }
+.tools .tool b { color: var(--text); }
+.card table tr.base td { color: var(--faint); font-style: italic; }
 .badge.v-go { background: rgba(74, 222, 128, 0.14); color: var(--green); border: 1px solid rgba(74, 222, 128, 0.45); }
 .badge.v-sel { background: rgba(242, 181, 68, 0.13); color: var(--amber); border: 1px solid rgba(242, 181, 68, 0.45); }
 .badge.v-skip { background: rgba(100, 118, 154, 0.13); color: var(--faint); border: 1px solid rgba(100, 118, 154, 0.4); }
